@@ -317,7 +317,7 @@ update_countdown (gpointer user_data)
 		text = g_strdup_printf ("Starts in %02" G_GINT64_FORMAT ":%02" G_GINT64_FORMAT,
 			remaining / 60, remaining % 60);
 	} else {
-		text = ui->local ? g_strdup ("Event started") : g_strdup ("Event started");
+		text = g_strdup ("Event started");
 	}
 	gtk_label_set_text (ui->countdown, text);
 	if (ui->until_button) gtk_widget_set_sensitive (ui->until_button, ui->event_start > time (NULL));
@@ -532,10 +532,6 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_widget_add_css_class (button, "reminder-snooze");
 	ui->until_button = button;
 	gtk_widget_set_sensitive (button, ui->event_start > time (NULL));
-	if (ui->event_start <= 0)
-		gtk_label_set_text (ui->status, ui->meeting_url ? "No start time." : "No meeting link or start time.");
-	else if (ui->event_start <= time (NULL))
-		gtk_label_set_text (ui->status, ui->meeting_url ? "Event started." : "No meeting link. Event started.");
 	g_signal_connect (button, "clicked", G_CALLBACK (on_snooze_until_start_clicked), ui);
 	gtk_flow_box_insert (GTK_FLOW_BOX (snooze_buttons), button, -1);
 	gtk_box_append (GTK_BOX (center), snooze_buttons);
