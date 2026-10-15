@@ -31,10 +31,10 @@ def load_config(path):
     try:
         config = tomllib.loads(pathlib.Path(path).read_text())
     except FileNotFoundError:
-        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0}}
+        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0, "volume": 0.5}, "calendar": {"eds_enabled": False}}
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ValueError(f"cannot load config {path}: {exc}") from exc
-    _keys(config, {"version", "selection", "reminders", "snooze", "display", "appearance", "audio"}, "root")
+    _keys(config, {"version", "selection", "reminders", "snooze", "display", "appearance", "audio", "calendar"}, "root")
     if type(config.get("version")) is not int or config["version"] != 1:
         raise ValueError("config requires version = 1")
     selection = config.get("selection", {})
@@ -63,13 +63,29 @@ def load_config(path):
     if appearance.get("theme", "default") not in ("default", "dark", "light"):
         raise ValueError("[appearance].theme must be default, dark, or light")
     audio = config.get("audio", {})
-    _keys(audio, {"enabled", "file", "repeat_seconds"}, "audio")
+    _keys(audio, {"enabled", "file", "repeat_seconds", "volume"}, "audio")
     if not isinstance(audio.get("enabled", False), bool) or not isinstance(audio.get("file", ""), str):
         raise ValueError("[audio].enabled must be boolean and [audio].file must be a path")
     repeat = audio.get("repeat_seconds", 0)
     if type(repeat) is not int or not 0 <= repeat <= 3600:
         raise ValueError("[audio].repeat_seconds must be an integer from 0 to 3600")
-    return {**config, "selection": {"mode": mode, "calendars": calendars}}
+    volume = audio.get("volume", 0.5)
+    if type(volume) not in (int, float) or not 0 <= volume <= 1:
+        raise ValueError("[audio].volume must be a number from 0 to 1")
+    calendar = config.get("calendar", {})
+    _keys(calendar, {"eds_enabled"}, "calendar")
+    if not isinstance(calendar.get("eds_enabled", False), bool):
+        raise ValueError("[calendar].eds_enabled must be boolean")
+    return {
+        **config,
+        "selection": {"mode": mode, "calendars": calendars},
+        "calendar": {"eds_enabled": calendar.get("eds_enabled", False)},
+        "audio": {"enabled": audio.get("enabled", False), "file": audio.get("file", ""), "repeat_seconds": repeat, "volume": volume},
+        "reminders": {"fallback_lead_minutes": lead},
+        "snooze": {"minutes": minutes},
+        "display": {"backend": display.get("backend", "native"), "outputs": display.get("outputs", "all")},
+        "appearance": {"theme": appearance.get("theme", "default")},
+    }
 
 
 def selected(config, source_id, calendar_id):
@@ -140,11 +156,13 @@ def main():
     p = sub.add_parser("cancel"); p.add_argument("id")
     p = sub.add_parser("status"); p.add_argument("id")
     p = sub.add_parser("list")
-    p = sub.add_parser("act"); p.add_argument("id"); p.add_argument("revision", type=int); p.add_argument("action", choices=["open", "dismiss", "snooze"]); p.add_argument("--minutes", type=int, default=5)
+    p = sub.add_parser("act"); p.add_argument("id"); p.add_argument("revision", type=int); p.add_argument("action", choices=["open", "dismiss", "snooze", "snooze-until"]); p.add_argument("--minutes", type=int, default=5); p.add_argument("--until", type=int, help="Unix timestamp for snooze-until")
     p = sub.add_parser("wait"); p.add_argument("id"); p.add_argument("--after-revision", type=int, default=0); p.add_argument("--timeout", type=int, default=0)
     p = sub.add_parser("check-selection"); p.add_argument("source_id"); p.add_argument("calendar_id")
     p = sub.add_parser("reload", help="explicitly reload the daemon policy from --config")
     p = sub.add_parser("config-check")
+    p = sub.add_parser("calendars", help="list local EDS calendars without changing account settings")
+    p.add_argument("--json", action="store_true")
     sub.add_parser("policy-json", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
@@ -152,11 +170,35 @@ def main():
     except ValueError as exc:
         raise SystemExit(str(exc))
     if args.command == "config-check":
-        print(json.dumps({"valid": True, "selection": config["selection"], "capabilities": {"display": "C GTK adapter", "audio": "not implemented", "calendar_listing": "EDS adapter pending"}}, indent=2)); return
+        print(json.dumps({"valid": True, "selection": config["selection"], "calendar": config["calendar"], "audio": config["audio"], "capabilities": {"display": "C GTK adapter", "audio": "pw-play", "calendar_listing": "EDS read-only"}}, indent=2)); return
     if args.command == "check-selection":
         print(json.dumps({"source_id": args.source_id, "calendar_id": args.calendar_id, "selected": selected(config, args.source_id, args.calendar_id)})); return
     if args.command == "policy-json":
-        print(json.dumps(config["selection"])); return
+        print(json.dumps({"selection": config["selection"], "audio": config["audio"], "calendar": config["calendar"], "reminders": config.get("reminders", {"fallback_lead_minutes": 5}), "snooze": config.get("snooze", {"minutes": [1, 5]}), "display": config.get("display", {"backend": "native", "outputs": "all"}), "appearance": config.get("appearance", {"theme": "default"})})); return
+    if args.command == "calendars":
+        try:
+            gi.require_version("EDataServer", "1.2")
+            from gi.repository import EDataServer
+            registry = EDataServer.SourceRegistry.new_sync(None)
+            sources = registry.list_sources(EDataServer.SOURCE_EXTENSION_CALENDAR)
+            records = []
+            for source in sources:
+                uid = source.get_uid()
+                parent_uid = source.get_parent()
+                parent = registry.ref_source(parent_uid) if parent_uid else None
+                extension = source.get_extension(EDataServer.SOURCE_EXTENSION_CALENDAR)
+                records.append({"source_id": "eds-local", "calendar_id": uid, "name": source.get_display_name(), "account": parent.get_display_name() if parent else "", "provider": extension.get_backend_name(), "selected": selected(config, "eds-local", uid)})
+            records.sort(key=lambda item: (item["account"].casefold(), item["name"].casefold(), item["calendar_id"]))
+            if args.json:
+                print(json.dumps({"calendars": records, "error": None}, indent=2))
+            else:
+                if not records: print("No EDS calendars found.")
+                for item in records: print(f"{'*' if item['selected'] else ' '} {item['name']} — {item['account'] or item['provider']} [{item['calendar_id']}]")
+        except Exception as exc:
+            message = f"EDS calendar discovery failed: {exc}"
+            if args.json: print(json.dumps({"calendars": [], "error": message}, indent=2))
+            else: raise SystemExit(message)
+        return
     ensure_service(args.core, args.config)
     if args.command == "reload":
         ok = call("ReloadPolicy", "(ss)", (args.config, str(pathlib.Path(__file__).resolve())))[0]
@@ -188,7 +230,7 @@ def main():
         if args.show:
             binary = str(pathlib.Path(__file__).resolve().parent.parent / "build" / "calendar-reminder-overlay")
             if not os.path.isfile(binary): raise SystemExit("GTK overlay is not built; run make first")
-            subprocess.Popen([binary, "--synthetic", data["id"]], start_new_session=True)
+            subprocess.Popen([binary, "--watch"], start_new_session=True)
         return
     if args.command == "cancel":
         print(json.dumps({"id": args.id, "cancelled": call("Cancel", "(s)", (args.id,))[0]})); return
@@ -196,9 +238,13 @@ def main():
     if args.command == "list": print(call("List")[0]); return
     if args.command == "act":
         payload = str(args.minutes) if args.action == "snooze" else ""
+        if args.action == "snooze-until":
+            if args.until is None:
+                raise SystemExit("snooze-until requires --until UNIX_TIMESTAMP")
+            payload = str(args.until)
         if args.action == "open":
             try:
-                title, body, destination, state, current_revision = call("Get", "(s)", (args.id,))
+                title, body, destination, state, current_revision, event_start = call("Get", "(s)", (args.id,))
                 if current_revision != args.revision or not destination:
                     raise SystemExit("Open requires the current alert revision and a destination URL")
                 Gio.AppInfo.launch_default_for_uri(destination, None)
