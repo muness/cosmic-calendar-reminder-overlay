@@ -68,13 +68,7 @@ trap 'rm -f "$candidate_config"' EXIT
 if [[ -e "$config_file" ]]; then
   config_to_validate="$config_file"
 else
-  cat >"$candidate_config" <<'CONFIG'
-version = 1
-
-[selection]
-mode = "include"
-calendars = []
-CONFIG
+  cp "$root/config.example.toml" "$candidate_config"
   chmod 0600 "$candidate_config"
   config_to_validate="$candidate_config"
 fi

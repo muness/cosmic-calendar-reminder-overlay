@@ -83,6 +83,7 @@ new_home fresh
 "$root/install.sh" >"$tmp/fresh.out"
 [[ ! -s "$SYSTEMCTL_LOG" ]]
 grep -Fq 'calendars = []' "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml"
+cmp "$root/config.example.toml" "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml"
 "$HOME/.local/bin/reminderctl" --config "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml" config-check \
   | grep -Fq '"valid": true'
 for command in reminder-demo reminder-diagnostics; do

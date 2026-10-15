@@ -15,7 +15,7 @@ From this checkout:
 ~/.local/bin/reminder-demo
 ```
 
-Installation builds the app and stages it in your home directory. It creates a configuration with no calendars selected; it does not start the background service. The installer reports missing dependencies before replacing installed files.
+Installation builds the app and stages it in your home directory. It creates a configuration with no calendars selected; it does not start the background service. The installer reports missing dependencies before replacing installed files. The generated config is a copy of [the commented template](config.example.toml): every option, allowed choice, and first-run step is explained beside its setting. Existing configs are preserved on updates.
 
 The preview shows a **Preview reminder — no calendar event** overlay with real buttons. Click **Dismiss** to finish, or **Snooze** to see it return; keep the terminal open while snoozed. Press Ctrl+C in that terminal to end the preview. It uses temporary state and a private D-Bus session, stays silent, and creates no calendar event. Replay it whenever you want. To try the Open meeting button:
 

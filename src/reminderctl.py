@@ -239,7 +239,7 @@ def main():
                 selected_by_config = selected(config, "eds-local", uid)
                 is_selected = source_enabled and selected_by_config and (not config["calendar"]["follow_selection"] or selected_in_evolution)
                 selection_key = f"eds-local/{uid}"
-                snippet = f'[calendar]\neds_enabled = true\n\n[selection]\nmode = "include"\ncalendars = [{json.dumps(selection_key)}]\n'
+                snippet = f'# One-calendar setup. Save, then Apply settings or run reminderctl reload.\nversion = 1\n\n[calendar]\neds_enabled = true\n# Keep this calendar checked in Evolution, or set follow_selection = false.\nfollow_selection = true\n\n[selection]\n# all / include / exclude; this snippet selects only the key below.\nmode = "include"\ncalendars = [{json.dumps(selection_key)}]\n'
                 records.append({"source_id": "eds-local", "calendar_id": uid, "selection_key": selection_key, "name": source.get_display_name(), "account": parent.get_display_name() if parent else "", "provider": extension.get_backend_name(), "enabled": source_enabled, "selected": is_selected, "selected_by_config": selected_by_config, "evolution_selected": selected_in_evolution, "toml_snippet": snippet})
             records.sort(key=lambda item: (item["account"].casefold(), item["name"].casefold(), item["calendar_id"]))
             if args.snippet:
