@@ -257,7 +257,7 @@ start_audio (void)
 				gchar *key = g_strdup_printf ("%s/%s", source, calendar);
 				JsonObject *root = json_node_get_object (validated_policy_node);
 				JsonObject *overrides = json_object_has_member (root, "calendar_overrides") ? json_object_get_object_member (root, "calendar_overrides") : NULL;
-				JsonObject *override = overrides ? json_object_get_object_member (overrides, key) : NULL;
+				JsonObject *override = overrides && json_object_has_member (overrides, key) ? json_object_get_object_member (overrides, key) : NULL;
 				if (override) {
 					if (json_object_has_member (override, "audio_enabled")) enabled = json_object_get_boolean_member (override, "audio_enabled");
 					if (json_object_has_member (override, "audio_file")) { g_free (file); file = g_strdup (json_object_get_string_member (override, "audio_file")); }
@@ -731,7 +731,7 @@ calendar_policy (const gchar *source_uid, gboolean *fallback_enabled, guint *lea
 	JsonObject *root = validated_policy_node ? json_node_get_object (validated_policy_node) : NULL;
 	JsonObject *overrides = root && json_object_has_member (root, "calendar_overrides") ? json_object_get_object_member (root, "calendar_overrides") : NULL;
 	gchar *key = g_strdup_printf ("eds-local/%s", source_uid);
-	JsonObject *override = overrides ? json_object_get_object_member (overrides, key) : NULL;
+	JsonObject *override = overrides && json_object_has_member (overrides, key) ? json_object_get_object_member (overrides, key) : NULL;
 	*fallback_enabled = !override || !json_object_has_member (override, "fallback_enabled") || json_object_get_boolean_member (override, "fallback_enabled");
 	*lead_minutes = override && json_object_has_member (override, "fallback_lead_minutes") ?
 		(guint) json_object_get_int_member (override, "fallback_lead_minutes") : fallback_lead_minutes;
@@ -938,7 +938,9 @@ eds_fetch_done (GObject *source, GAsyncResult *result, gpointer user_data)
 			ICalTimezone *zone = e_cal_client_get_default_timezone (scan->client);
 			if (!zone) {
 				GTimeZone *local = g_time_zone_new_local ();
-				zone = i_cal_timezone_get_builtin_timezone_from_tzid (g_time_zone_get_identifier (local));
+				const gchar *identifier = g_time_zone_get_identifier (local);
+				zone = i_cal_timezone_get_builtin_timezone_from_tzid (identifier);
+				if (!zone) zone = i_cal_timezone_get_builtin_timezone (identifier);
 				g_time_zone_unref (local);
 			}
 			if (!zone) g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "No timezone is available for this calendar; preserving the prior snapshot");
