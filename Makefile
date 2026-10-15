@@ -21,6 +21,7 @@ check: all $(BUILD)/policy-renderer-check
 	$(BUILD)/policy-renderer-check
 	dbus-run-session -- tests/core-smoke.sh "$(CURDIR)/$(BUILD)/reminder-core" "$(CURDIR)/src/reminderctl.py"
 	dbus-run-session -- /usr/bin/python3 tests/cli-open.py "$(CURDIR)"
+	dbus-run-session -- /usr/bin/python3 tests/audio-policy.py "$(CURDIR)"
 
 clean:
 	rm -rf $(BUILD)
