@@ -1,0 +1,12 @@
+[Unit]
+Description=Fullscreen Evolution calendar reminders with clickable actions
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/evolution-dunst-reminders
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
