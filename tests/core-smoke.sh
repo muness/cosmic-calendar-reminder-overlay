@@ -7,11 +7,20 @@ tmp="$(mktemp -d)"
 state="$tmp/alerts.sqlite3"
 config="$tmp/config.toml"
 daemon=""
+renderer_log="$tmp/renderer.log"
+renderer_stub="$tmp/renderer-stub"
 cleanup() {
   if [[ -n "$daemon" ]]; then kill "$daemon" 2>/dev/null || true; wait "$daemon" 2>/dev/null || true; fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
+
+cat >"$renderer_stub" <<EOF_RENDERER
+#!/bin/sh
+printf '%s\n' "\$*" >>"$renderer_log"
+exec sleep 60
+EOF_RENDERER
+chmod +x "$renderer_stub"
 
 cat >"$config" <<'EOF'
 version = 1
@@ -42,6 +51,13 @@ config.write_text('version = 1\n')
 policy = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', str(config), 'policy-json'], text=True))
 assert policy['audio'] == {'enabled': False, 'file': '', 'repeat_seconds': 0, 'volume': 0.5}, policy
 assert policy['calendar'] == {'eds_enabled': False}, policy
+override = pathlib.Path(directory) / 'override.toml'
+override.write_text('version=1\n[calendar_overrides."eds-local/cal"]\nfallback_enabled=true\nfallback_lead_minutes=17\n')
+policy = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', str(override), 'policy-json'], text=True))
+assert policy['calendar_overrides']['eds-local/cal'] == {'fallback_enabled': True, 'fallback_lead_minutes': 17}, policy
+override.write_text('version=1\n[calendar_overrides."eds-local/cal"]\nfallback_lead_minutes=121\n')
+bad = subprocess.run(['/usr/bin/python3', cli, '--config', str(override), 'config-check'], capture_output=True, text=True)
+assert bad.returncode != 0, 'invalid per-calendar fallback lead was accepted'
 PYDEFAULTS
 cat >"$tmp/bad.toml" <<'EOF'
 version = 1
@@ -55,7 +71,7 @@ if /usr/bin/python3 "$cli" --config "$tmp/bad.toml" config-check >/dev/null 2>&1
 fi
 
 start_core() {
-  "$core" --headless --state "$state" --config "$config" --helper "$cli" >"$tmp/core.log" 2>&1 &
+  "$core" --headless --state "$state" --config "$config" --helper "$cli" --overlay "$renderer_stub" >"$tmp/core.log" 2>&1 &
   daemon=$!
   for _ in {1..40}; do
     if gdbus call --session --dest org.muness.CalendarReminderOverlay.Core \
@@ -93,7 +109,7 @@ connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 preview = connection.call_sync('org.muness.CalendarReminderOverlay.Core', '/org/muness/CalendarReminderOverlay/Core', 'org.muness.CalendarReminderOverlay.Core1', 'Get', GLib.Variant('(s)', ('json:accepted',)), GLib.VariantType.new('(sssstt)'), Gio.DBusCallFlags.NONE, 2000, None).unpack()
 assert preview == ('JSON input', '', '', 'active', 1, 0), preview
 diagnostics = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'diagnostics'], text=True))
-assert diagnostics == {'eds_enabled': False, 'last_scan_unix': 0, 'calendars': []}, diagnostics
+assert diagnostics == {'eds_enabled': False, 'registry_state': 'disabled', 'active_scans': 0, 'last_scan_unix': 0, 'calendars': []}, diagnostics
 items = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'list'], text=True))
 owned = next(item for item in items if item['id'] == 'json:accepted')
 assert (owned['source_id'], owned['calendar_id'], owned['owner']) == ('fixture', 'selected', 'producer'), owned
@@ -106,6 +122,12 @@ assert next(item for item in items if item['id'] == 'json:accepted')['state'] ==
 restore = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'reload'], text=True, capture_output=True)
 assert restore.returncode == 0 and json.loads(restore.stdout)['reloaded'], restore.stderr
 PY
+/usr/bin/python3 "$cli" --config "$config" notify renderer:armed Renderer >/dev/null
+sleep 1.2
+[[ ! -e "$renderer_log" ]] || { echo "headless core started a renderer before presentation was armed" >&2; exit 1; }
+foreground renderer:armed
+for _ in {1..20}; do [[ -s "$renderer_log" ]] && break; sleep .05; done
+[[ -s "$renderer_log" ]] || { echo "armed alert did not start the shared renderer" >&2; exit 1; }
 /usr/bin/python3 "$cli" --config "$config" notify timer:tea Tea --body "boil water" >/dev/null
 [[ "$(/usr/bin/python3 "$cli" --config "$config" act timer:tea 1 snooze --minutes 10080 | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')" == accepted ]]
 assert_state timer:tea snoozed
