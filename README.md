@@ -50,3 +50,7 @@ LD_PRELOAD=/usr/lib/libgtk4-layer-shell.so ./demo/overlay-mock.py
 ## Current status
 
 This is a personal project in active development, tested on COSMIC Wayland with Evolution calendars. The service currently uses Evolution's local calendar APIs and has not been packaged for distribution.
+
+## Reuse and portability research
+
+See [the problem-space and reuse audit](docs/attention-overlay-research.md) for the verified component capabilities, existing alternatives, source/display boundaries, and proposed CLI/TOML configuration. The proposed features in that report are not yet implemented.
