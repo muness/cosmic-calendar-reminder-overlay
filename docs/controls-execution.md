@@ -8,14 +8,14 @@ Preserve the accepted huge overlay, explicit action buttons, calendar synchroniz
 
 ## Execution checklist and adversarial checks
 
-- [ ] Confirmed core state and persisted toggle; reject an applet-only boolean that resets at login.
-- [ ] Disabled means no overlay/audio, including already-open views and renderer restart; reject merely hiding the panel icon.
-- [ ] Sync and pending alarms retained; reject stopping the service or dismissing provider alarms.
-- [ ] Evolution selected bit intersects source enablement/TOML selection on native/fallback and async completion; reject checking only source Enabled.
-- [ ] Default editor launch uses argument/file APIs, supports spaces/XDG config paths, and reports missing associations; reject a shell-interpolated EDITOR command.
-- [ ] Confirmed UI state, bounded requests, explicit failure/reconnect, no provider polling; reject optimistic state or service autostart from status reads.
-- [ ] Add/remove only this applet's payload; preserve panel composition and unrelated notification daemons.
-- [ ] Build the native applet and retire model-checkable core/editor risks in isolated checks; report native input interaction requiring the user separately.
+- [x] Confirmed core state and persisted toggle; reject an applet-only boolean that resets at login.
+- [x] Disabled means no overlay/audio, including already-open views and renderer restart; reject merely hiding the panel icon.
+- [x] Sync and pending alarms retained; reject stopping the service or dismissing provider alarms.
+- [x] Evolution selected bit intersects source enablement/TOML selection on native/fallback and async completion; reject checking only source Enabled.
+- [x] Default editor launch uses argument/file APIs, supports spaces/XDG config paths, and reports missing associations; reject a shell-interpolated EDITOR command.
+- [x] Confirmed UI state, bounded requests, explicit failure/reconnect, no provider polling; reject optimistic state or service autostart from status reads.
+- [x] Add/remove only this applet's payload; preserve panel composition and unrelated notification daemons.
+- [x] Build the native applet and retire model-checkable core/editor risks in isolated checks; report native input interaction requiring the user separately.
 
 Stop/pivot if libcosmic cannot build against the available COSMIC session or if disabling requires provider mutation. A service-stopped state is an error/recovery state, not a fake Off switch. No publication/visibility change is part of this task.
 
@@ -42,3 +42,11 @@ Dissent: an applet-local switch would reset or lie after a core restart; stoppin
 | Native popup input and appearance | Human verification | Release build succeeds, native COSMIC patterns used; tooling cannot operate this session's native controls. User must click the installed popup. |
 
 Focused build, calendar selection, renderer policy, EDS fixtures, installer smoke, shellcheck, Python syntax, Rust format, native D-Bus client, editor, and optional staging checks passed. The full core smoke reached its pre-existing audio shutdown tail and reported a surviving PID; a separate actual-core blocking-playback shutdown check passed and cleanup code was unchanged. Do not report a clean full-suite run. No calendar event was created and no notification daemon was reconfigured.
+
+## Installed handoff
+
+PR18 core and PR17 applet were reviewed/dissented and merged to the integration branch. Installed with --with-applet --activate. The systemd user service is active; presentation reads enabled; the native applet process is running. Added only com.muness.CalendarReminderControl immediately after the existing calendar applet in this user's right panel wing, preserving all other entries. Backup: ~/.config/cosmic/com.system76.CosmicPanel.Panel/v1/plugins_wings.before-reminder-controls-20261015-134330. The reusable installer registers the applet but does not rewrite other users' panels.
+
+Live read-only comparison confirms the installed helper's effective selection matches Evolution/EDS enablement and checkbox state for all 19 sources: 6 are selected. No calendar selection or provider settings were changed. The current default text editor was not opened automatically; only the isolated stub editor was exercised. Actual popup click/keyboard interaction remains the explicit user-verification boundary. Native controls were not clicked programmatically and no test calendar event or overlay was sent during this task.
+
+Execution status: shipped and running, with native input acceptance handed to the user. Original scope preserved: enable/disable and settings, no agenda. Read-only status and helper checks confirm active source registry and no current fetches. Full-suite caveat above remains recorded rather than hidden.
