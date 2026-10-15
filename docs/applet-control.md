@@ -1,27 +1,23 @@
 # Reminder controls in the panel
 
-Proposal, not an installed feature. Scope narrowed after user feedback: the existing COSMIC calendar applet already supplies the calendar and agenda. This project needs a reminder control, not another event browser.
+The optional native COSMIC applet controls reminder presentation. Calendar browsing stays in the existing COSMIC calendar applet.
 
-## Small popup
+## Install and use
 
-- **Reminders on/off**, with a readable state label and a switch.
-- **Show demo reminder** to check presentation.
-- **Settings** to reach configuration.
+Build/install with `./install.sh --with-applet --activate`, then add **Reminder Controls** in COSMIC Settings → Desktop → Panel → Applets. Cargo and the libcosmic build dependencies are required; the applet has its own pinned Cargo.lock. The default overlay-only install does not require Rust.
 
-No month grid, upcoming-events list, calendar editing, or provider account setup. Timed pause can be added later; it is not needed for the first control.
+The popup has a confirmed **Reminders on/off** switch and **Open settings**. After opening the TOML file in your default desktop plain-text editor, save it and use **Apply settings** in the popup. Invalid settings keep the previous policy. Missing editor associations, service failures, and rejected actions appear in the popup. The panel icon distinguishes On, Off, and unavailable states; the popup also labels each state in text.
 
-Turning reminders off should suppress overlay presentation and audio while keeping calendar synchronization alive. It must not dismiss provider alarms, remove events, or change ordinary desktop notifications. Persist the state in the shared core, and expose the same control through the CLI. The applet reflects the confirmed core state and reports service-unavailable or failed-update states honestly.
+Off persists in the core database. It suppresses overlays and audio, including current presentation, while calendar ingestion continues. It does not dismiss events or provider alarms. Re-enabling presents eligible reminders; past events are not resurrected merely because the switch changed. The same control is available through `reminderctl enable`, `disable`, and `presentation-status`.
 
-A native COSMIC applet can use the [official template](https://github.com/pop-os/cosmic-applet-template) and [panel popup pattern](https://pop-os.github.io/libcosmic-book/panel-applets.html). It should call the shared core over session D-Bus. The core does not yet have a global presentation enable/disable API; stopping the service is not equivalent because it also stops synchronization.
+The applet is a session D-Bus client. It observes state and core owner changes rather than polling providers, uses bounded requests without implicit service activation, and retains confirmed state until a write succeeds. No agenda, month grid, provider setup, timed pause, or applet-owned alert database is included.
+
+The native integration follows the [official applet template](https://github.com/pop-os/cosmic-applet-template) and [panel popup pattern](https://pop-os.github.io/libcosmic-book/panel-applets.html).
 
 ## Follow existing calendar selection
 
 The [COSMIC calendar applet's EDS backend](https://github.com/Hasmolam/cosmic-ext-applet-calendar/blob/main/src/event/eds.rs) discovers enabled sources and excludes those with `Selected=false`. It already uses the same EDS account infrastructure as Evolution. An earlier proposal incorrectly described a separate account/sync model; no extra account setup is needed for its EDS backend.
 
-Our source currently checks EDS source enablement and its own TOML selection, but does not check the Calendar extension's selected flag. Enabled and selected are different: a connected calendar may be unchecked in Evolution.
+Enabled and selected are different: a connected calendar may be unchecked in Evolution. The reminder core follows both by default.
 
-The intended default is to follow Evolution's checked calendars using [ESourceSelectable.get_selected](https://gnome.pages.gitlab.gnome.org/evolution-data-server/libedataserver/method.SourceSelectable.get_selected.html), with explicit TOML overrides available for users who want a different reminder selection. React to source changes so checking/unchecking a calendar updates eligibility, withdraws excluded presentations, and stops their audio without dismissing provider alarms. Apply the same selection decision to native alarms, fallback scans, pending fetch results, and calendar diagnostics. This behavior is proposed, not yet implemented.
-
-## First useful increment
-
-Implement shared-core enable/disable controls and desktop calendar-selection following. Then add the small panel popup. Keep the existing calendar applet responsible for browsing events. Reuse the control API for other desktop clients later.
+The default `calendar.follow_selection = true` follows Evolution's checked calendars using [ESourceSelectable.get_selected](https://gnome.pages.gitlab.gnome.org/evolution-data-server/libedataserver/method.SourceSelectable.get_selected.html), intersected with the TOML include/exclude/all selection. Set `calendar.follow_selection = false` to ignore the checked state; disabled sources remain excluded. Registry source changes update eligibility. The same filter applies to native alarms, fallback scans, pending fetch results, and diagnostics; deselection withdraws local presentation without a provider dismissal.

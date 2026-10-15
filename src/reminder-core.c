@@ -369,7 +369,7 @@ calendar_uid_may_retain_snapshot (const gchar *uid)
 	/* A registry outage leaves cached data stale, but cannot make it
 	 * presentable. Preserve it until the source's enabled/selected state is
 	 * known again. */
-	if (eds_enabled && follow_calendar_selection && !eds_registry) return TRUE;
+	if (eds_enabled && !eds_registry) return TRUE;
 	return calendar_uid_selected (uid);
 }
 
@@ -1305,7 +1305,7 @@ renderer_should_run (void)
 		while (g_hash_table_iter_next (&iter, &id, NULL)) {
 			gchar *state = NULL;
 			gboolean exists = read_one (id, NULL, &state, NULL, NULL, NULL);
-			if (exists && g_str_equal (state, "active")) armed_active = TRUE;
+			if (exists && g_str_equal (state, "active") && alert_presentable (id)) armed_active = TRUE;
 			else if (!exists || (!g_str_equal (state, "snoozed") && !g_str_equal (state, "scheduled")))
 				g_hash_table_iter_remove (&iter);
 			g_free (state);

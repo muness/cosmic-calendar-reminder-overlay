@@ -23,6 +23,9 @@ rm -f "$unit" \
   "${HOME}/.local/bin/reminderctl" \
   "${HOME}/.local/bin/reminder-diagnostics" \
   "${HOME}/.local/bin/reminder-demo" \
+  "${HOME}/.local/bin/reminder-settings" \
+  "${HOME}/.local/bin/cosmic-ext-applet-reminders" \
+  "${data_home}/applications/com.muness.CalendarReminderControl.desktop" \
   "${data_home}/calendar-reminder-overlay/build/reminder-core" \
   "${data_home}/calendar-reminder-overlay/build/calendar-reminder-overlay" \
   "${data_home}/calendar-reminder-overlay/src/reminderctl.py" \

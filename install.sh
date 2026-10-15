@@ -2,11 +2,13 @@
 set -euo pipefail
 : "${HOME:?HOME must be set}"
 
-usage() { printf 'Usage: %s [--activate]\n' "${0##*/}"; }
+usage() { printf 'Usage: %s [--activate] [--with-applet]\n' "${0##*/}"; }
 activate=false
+with_applet=false
 while (($#)); do
   case "$1" in
     --activate) activate=true ;;
+    --with-applet) with_applet=true ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -28,6 +30,9 @@ for tool in make pkg-config busctl dbus-run-session; do
   command -v "$tool" >/dev/null || missing+=("$tool")
 done
 command -v "${CC:-cc}" >/dev/null || missing+=("${CC:-cc} (C compiler)")
+if [[ "$with_applet" == true ]]; then
+  command -v cargo >/dev/null || missing+=("cargo (optional COSMIC applet)")
+fi
 if [[ "$activate" == true ]]; then
   command -v systemctl >/dev/null || missing+=("systemctl (user service activation)")
 fi
@@ -47,7 +52,13 @@ if ! /usr/bin/python3 -c 'import tomllib; from gi.repository import Gio, GLib' >
   exit 1
 fi
 make -C "$root" all
-for artifact in build/reminder-core build/calendar-reminder-overlay src/reminderctl.py scripts/reminder-demo scripts/reminder-diagnostics; do
+if [[ "$with_applet" == true ]]; then
+  cargo build --release --locked --manifest-path "$root/applet/Cargo.toml"
+  applet_target_dir="$(cargo metadata --format-version 1 --no-deps --manifest-path "$root/applet/Cargo.toml" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+  applet_binary="$applet_target_dir/release/cosmic-ext-applet-reminders"
+  [[ -x "$applet_binary" ]] || { echo "Applet build did not produce $applet_binary" >&2; exit 1; }
+fi
+for artifact in build/reminder-core build/calendar-reminder-overlay src/reminderctl.py scripts/reminder-demo scripts/reminder-diagnostics scripts/reminder-settings; do
   [[ -f "$root/$artifact" ]] || { echo "Build did not produce $artifact" >&2; exit 1; }
 done
 
@@ -110,6 +121,21 @@ chmod 0755 "${bin_dir}/reminderctl"
 
 install -m 0755 "$root/scripts/reminder-demo" "${bin_dir}/reminder-demo"
 install -m 0755 "$root/scripts/reminder-diagnostics" "${bin_dir}/reminder-diagnostics"
+install -m 0755 "$root/scripts/reminder-settings" "${bin_dir}/reminder-settings"
+if [[ "$with_applet" == true ]]; then
+  install -m 0755 "$applet_binary" "${bin_dir}/cosmic-ext-applet-reminders"
+  mkdir -p "$data_home/applications"
+  /usr/bin/python3 - "$root/applet/data/com.muness.CalendarReminderControl.desktop" "$data_home/applications/com.muness.CalendarReminderControl.desktop" "$bin_dir/cosmic-ext-applet-reminders" <<'DESKTOP'
+import pathlib, sys
+source, target, executable = sys.argv[1:]
+# Desktop Exec quoting, with literal field-code and reserved-character escaping.
+escaped = executable.replace("%", "%%")
+for char in ("\\", '"', "`", "$"):
+    escaped = escaped.replace(char, "\\" + char)
+pathlib.Path(target).write_text(pathlib.Path(source).read_text().replace("Exec=cosmic-ext-applet-reminders", 'Exec="' + escaped + '"'))
+DESKTOP
+  echo 'COSMIC applet installed. Add Reminder Controls in Settings → Desktop → Panel → Applets.'
+fi
 
 install -m 0644 "$root/systemd/calendar-reminder-overlay.service" "$unit_file"
 
