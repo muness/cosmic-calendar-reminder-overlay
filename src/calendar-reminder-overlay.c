@@ -91,11 +91,11 @@ local_action_done (GObject *source, GAsyncResult *result, gpointer user_data)
 		}
 		g_variant_unref (response);
 	}
-	gtk_label_set_text (ui->status, "The reminder service did not accept that action. Try again or choose another button.");
+	gtk_label_set_text (ui->status, "Action failed. Try again.");
 	for (guint i = 0; watch_views && i < watch_views->len; i++) {
 		GtkWindow *copy_window = g_ptr_array_index (watch_views, i);
 		ReminderUi *copy = g_object_get_data (G_OBJECT (copy_window), "reminder-ui");
-		if (copy) gtk_label_set_text (copy->status, "The reminder service did not accept that action. Try again or choose another button.");
+		if (copy) gtk_label_set_text (copy->status, "Action failed. Try again.");
 	}
 	g_clear_error (&error);
 	g_object_unref (window);
@@ -244,7 +244,7 @@ on_close_request (GtkWindow *window, gpointer user_data)
 {
 	ReminderUi *ui = user_data;
 	(void) window;
-	gtk_label_set_text (ui->status, "Use Dismiss or a Snooze button to resolve this reminder.");
+	gtk_label_set_text (ui->status, "Choose Dismiss or Snooze.");
 	return TRUE;
 }
 
@@ -312,12 +312,12 @@ update_countdown (gpointer user_data)
 	if (ui->finished)
 		return G_SOURCE_REMOVE;
 	if (ui->event_start <= 0) {
-		text = g_strdup ("No event start time is available");
+		text = g_strdup ("No start time");
 	} else if (remaining > 0) {
 		text = g_strdup_printf ("Starts in %02" G_GINT64_FORMAT ":%02" G_GINT64_FORMAT,
 			remaining / 60, remaining % 60);
 	} else {
-		text = ui->local ? g_strdup ("Event has already started") : g_strdup ("Event has already started");
+		text = g_strdup ("Event started");
 	}
 	gtk_label_set_text (ui->countdown, text);
 	if (ui->until_button) gtk_widget_set_sensitive (ui->until_button, ui->event_start > time (NULL));
@@ -355,7 +355,7 @@ on_open_meeting_clicked (GtkButton *button, gpointer user_data)
 	if (ui->local) local_stop_audio ();
 	if (!g_app_info_launch_default_for_uri (ui->meeting_url, NULL, &error)) {
 		g_warning ("Could not open meeting link: %s", error ? error->message : "unknown error");
-		gtk_label_set_text (ui->status, "Could not open the meeting link. Retry Open or choose another action.");
+		gtk_label_set_text (ui->status, "Could not open link. Try again.");
 		ui->pending_action = FALSE;
 		watch_action_pending = FALSE;
 		for (guint i = 0; watch_views && i < watch_views->len; i++) {
@@ -470,13 +470,13 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_widget_add_css_class (status, "reminder-status");
 	gtk_label_set_xalign (GTK_LABEL (status), 0.0f);
 	gtk_box_append (GTK_BOX (content), status);
-	message = gtk_label_new (ui->meeting_url ? "" : "No meeting link is available for this reminder.");
+	message = gtk_label_new (ui->meeting_url ? "" : "No meeting link.");
 	ui->status = GTK_LABEL (message);
 	gtk_widget_add_css_class (message, "reminder-status");
 	gtk_label_set_xalign (GTK_LABEL (message), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (message), TRUE);
 	gtk_box_append (GTK_BOX (content), message);
-	GtkWidget *keyboard_hint = gtk_label_new ("Click the background to focus the reminder, then press Tab to move between buttons.");
+	GtkWidget *keyboard_hint = gtk_label_new ("Click the background, then Tab to choose a button.");
 	gtk_widget_add_css_class (keyboard_hint, "reminder-hint");
 	gtk_label_set_xalign (GTK_LABEL (keyboard_hint), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (keyboard_hint), TRUE);
@@ -532,10 +532,6 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_widget_add_css_class (button, "reminder-snooze");
 	ui->until_button = button;
 	gtk_widget_set_sensitive (button, ui->event_start > time (NULL));
-	if (ui->event_start <= 0)
-		gtk_label_set_text (ui->status, ui->meeting_url ? "Until event starts is unavailable because no start time is available." : "No meeting link or event start time is available.");
-	else if (ui->event_start <= time (NULL))
-		gtk_label_set_text (ui->status, ui->meeting_url ? "Until event starts is unavailable because the event has already started." : "No meeting link is available; the event has already started.");
 	g_signal_connect (button, "clicked", G_CALLBACK (on_snooze_until_start_clicked), ui);
 	gtk_flow_box_insert (GTK_FLOW_BOX (snooze_buttons), button, -1);
 	gtk_box_append (GTK_BOX (center), snooze_buttons);

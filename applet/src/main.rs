@@ -51,20 +51,20 @@ async fn presentation(set: Option<bool>) -> Result<bool, String> {
                 .await
                 .map_err(|e| e.to_string())?;
             if accepted != Some(true) {
-                return Err("The reminder service could not save that change. Try again.".into());
+                return Err("Could not save. Try again.".into());
             }
         }
         let state: Option<bool> = proxy
             .call_with_flags("GetPresentation", MethodFlags::NoAutoStart.into(), &())
             .await
             .map_err(|e| e.to_string())?;
-        state.ok_or_else(|| "The reminder service returned no state.".into())
+        state.ok_or_else(|| "Could not read reminder status.".into())
     };
     tokio::time::timeout(Duration::from_secs(5), request).await
-        .map_err(|_| "The reminder service is not responding. Try again.".to_string())?
+        .map_err(|_| "Service not responding. Try again.".to_string())?
         .map_err(|error: String| {
             if error.contains("ServiceUnknown") || error.contains("NameHasNoOwner") {
-                "The reminder service is stopped. Start it with systemctl --user start calendar-reminder-overlay.service.".into()
+                "Service stopped. Run: systemctl --user start calendar-reminder-overlay.service".into()
             } else { error }
         })
 }
@@ -94,14 +94,14 @@ async fn settings_command(apply: bool) -> Result<(), String> {
     command.kill_on_drop(true);
     let result = tokio::time::timeout(Duration::from_secs(10), command.output())
         .await
-        .map_err(|_| "The settings action timed out. Try again.".to_string())?
+        .map_err(|_| "Settings request timed out. Try again.".to_string())?
         .map_err(|e| format!("Could not open settings: {e}"))?;
     if result.status.success() {
         Ok(())
     } else {
         let detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
         Err(if detail.is_empty() {
-            "The settings action failed. Try again.".into()
+            "Settings failed. Try again.".into()
         } else {
             detail
         })
@@ -239,7 +239,7 @@ impl cosmic::Application for Reminders {
                     Ok(()) => {
                         self.editing = true;
                         self.notice =
-                            Some("Save your changes in the editor, then apply them here.");
+                            Some("Save, then click Apply settings.");
                     }
                     Err(error) => self.error = Some(error),
                 }
@@ -297,19 +297,14 @@ impl cosmic::Application for Reminders {
             toggle = toggle.on_toggle(Message::Toggle);
         }
         let status = widget::settings::item(label, toggle);
-        let description = if self.busy {
-            "Updating…"
-        } else if self.enabled == Some(false) {
-            "Overlays and sound are off. Calendars keep syncing."
-        } else {
-            "Control reminder overlays and sound. Your ordinary notifications are unchanged."
-        };
         let mut content = cosmic::iced::widget::Column::new()
             .spacing(spacing.space_s)
             .padding(spacing.space_s)
             .push(widget::text::heading("Calendar reminders"))
-            .push(status)
-            .push(widget::text::body(description));
+            .push(status);
+        if self.busy {
+            content = content.push(widget::text::body("Working…"));
+        }
         if let Some(error) = &self.error {
             content = content.push(widget::text::body(error));
             if !self.busy {
@@ -388,7 +383,7 @@ impl cosmic::Application for Reminders {
                             _ => {
                                 let _ = output
                                     .send(Message::State(Err(
-                                        "Could not watch the reminder service. Reconnecting…"
+                                        "Connection failed. Reconnecting…"
                                             .into(),
                                     )))
                                     .await;
@@ -396,7 +391,7 @@ impl cosmic::Application for Reminders {
                         }
                         let _ = output
                             .send(Message::State(Err(
-                                "The reminder service connection was lost. Reconnecting…".into(),
+                                "Disconnected. Reconnecting…".into(),
                             )))
                             .await;
                         tokio::time::sleep(Duration::from_secs(5)).await;
