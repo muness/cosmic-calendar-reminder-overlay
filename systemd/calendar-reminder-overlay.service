@@ -1,10 +1,11 @@
 [Unit]
-Description=Fullscreen Evolution calendar reminders with clickable actions
+Description=Calendar reminder overlay core and renderer
 After=graphical-session.target
+Wants=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/evolution-dunst-reminders
+ExecStart="%h/.local/bin/calendar-reminder-overlay-service"
 Restart=on-failure
 RestartSec=3
 
