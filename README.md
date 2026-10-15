@@ -10,14 +10,14 @@ After building and staging once with `make && ./install.sh`, try the preview in 
 
 ```sh
 reminder-demo
-reminder-setup-help  # optional: explicitly list local EDS calendars and copy selection keys
+reminderctl calendars  # optional: explicitly list local EDS calendars and copy selection keys
 ${EDITOR:-vi} "${XDG_CONFIG_HOME:-$HOME/.config}/calendar-reminder-overlay/config.toml"
 reminderctl config-check
 ./install.sh --activate
 reminder-diagnostics
 ```
 
-`reminder-setup-help` only reads calendars already visible to EDS; it does not create accounts or edit the config. Uncomment only the desired calendar keys in its TOML template. Leave `[calendar].eds_enabled = false` for a preview-only setup. The initial config selects no calendars, and installing or previewing does not take over Dunst, SwayNC, or another ordinary notification service. The preview uses the actual GTK alert buttons; keep its terminal open after Snooze so the isolated core can show the alert again when that snooze expires. Its private D-Bus may produce accessibility or portal warnings; those are not hidden, and desktop/session handoff still needs real-session validation.
+`reminderctl calendars` explicitly reads calendars already visible to EDS; it does not create accounts or edit the config. Copy the exact selection key into `[selection].calendars`, or generate a minimal config snippet for one calendar with `reminderctl calendars --snippet <calendar-id-or-full-key>`. Leave `[calendar].eds_enabled = false` for a preview-only setup. The initial config selects no calendars, and installing or previewing does not take over Dunst, SwayNC, or another ordinary notification service. The preview uses the actual GTK alert buttons; keep its terminal open after Snooze so the isolated core can show the alert again when that snooze expires. Its private D-Bus may produce accessibility or portal warnings; those are not hidden, and desktop/session handoff still needs real-session validation.
 
 ## Build and install
 
@@ -29,7 +29,7 @@ make check
 ./install.sh
 ```
 
-`install.sh` builds and stages the files under `$XDG_DATA_HOME/calendar-reminder-overlay` (default: `~/.local/share`), creates `reminderctl`, `reminder-demo`, `reminder-setup-help`, and `reminder-diagnostics` commands in `~/.local/bin`, and installs the user service file. It does not enable or start the service. The first configuration is created at `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml` (default: `~/.config`) with an empty calendar selection. Existing configuration is validated before installed files are replaced.
+`install.sh` builds and stages the files under `$XDG_DATA_HOME/calendar-reminder-overlay` (default: `~/.local/share`), creates `reminderctl`, `reminder-demo`, and `reminder-diagnostics` commands in `~/.local/bin`, and installs the user service file. It does not enable or start the service. The first configuration is created at `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml` (default: `~/.config`) with an empty calendar selection. Existing configuration is validated before installed files are replaced.
 
 Review the configuration, then explicitly activate the service:
 
@@ -61,7 +61,7 @@ reminder-demo
 reminder-demo --url 'https://example.org'
 ```
 
-`reminder-demo` does not enroll a calendar or run automatically during installation. `reminder-diagnostics` reports installed paths, config validation, EDS selection state, renderer capability evidence, and the already-running core's alert and per-source freshness/errors when exposed. It never initializes account discovery or auto-starts the service; run `reminder-setup-help` explicitly to list existing EDS calendars. A stale/error source points to the account/provider and service journal. A headless renderer-capability failure needs a rerun in the target graphical session and does not by itself prove display incompatibility.
+`reminder-demo` does not enroll a calendar or run automatically during installation. `reminder-diagnostics` reports installed paths, config validation, EDS selection state, renderer capability evidence, and the already-running core's alert and per-source freshness/errors when exposed. It never initializes account discovery or auto-starts the service; run `reminderctl calendars` explicitly to list existing EDS calendars. A stale/error source points to the account/provider and service journal. A headless renderer-capability failure needs a rerun in the target graphical session and does not by itself prove display incompatibility.
 
 ## Uninstall
 

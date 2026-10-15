@@ -24,7 +24,7 @@ legacy_unit="evolution-dunst-reminders.service"
 
 command -v make >/dev/null || { echo 'make is required' >&2; exit 1; }
 make -C "$root" all
-for artifact in build/reminder-core build/calendar-reminder-overlay src/reminderctl.py scripts/reminder-demo scripts/reminder-diagnostics scripts/reminder-setup-help; do
+for artifact in build/reminder-core build/calendar-reminder-overlay src/reminderctl.py scripts/reminder-demo scripts/reminder-diagnostics; do
   [[ -f "$root/$artifact" ]] || { echo "Build did not produce $artifact" >&2; exit 1; }
 done
 
@@ -87,7 +87,6 @@ chmod 0755 "${bin_dir}/reminderctl"
 
 install -m 0755 "$root/scripts/reminder-demo" "${bin_dir}/reminder-demo"
 install -m 0755 "$root/scripts/reminder-diagnostics" "${bin_dir}/reminder-diagnostics"
-install -m 0755 "$root/scripts/reminder-setup-help" "${bin_dir}/reminder-setup-help"
 
 install -m 0644 "$root/systemd/calendar-reminder-overlay.service" "$unit_file"
 

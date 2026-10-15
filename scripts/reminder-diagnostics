@@ -61,9 +61,9 @@ def pretty_policy(policy):
         print("  Next: set [calendar].eds_enabled = true only if you want EDS calendars.")
     print(f"Calendar selection: mode={mode}, {len(selected)} explicit key(s)")
     if mode == "include" and not selected:
-        print("  No calendars are selected. Next: run reminder-setup-help, then add desired keys to [selection].calendars.")
+        print("  No calendars are selected. Next: run `reminderctl calendars`, then add desired keys to [selection].calendars.")
     elif selected or mode != "include":
-        print("  Registry discovery is not run by diagnostics. Next: run reminder-setup-help to inspect available keys explicitly.")
+        print("  Registry discovery is not run by diagnostics. Next: run `reminderctl calendars` to inspect available keys explicitly.")
     audio = policy.get("audio", {})
     if not audio.get("enabled", False):
         print("Audio: disabled by config; the preview is silent unless you enable it.")
@@ -85,7 +85,7 @@ def print_core_diagnostics(raw):
     calendars = data.get("calendars", [])
     if not calendars:
         if enabled:
-            print("  No per-calendar runtime rows are available. Next: run reminder-setup-help for explicit read-only registry discovery.")
+            print("  No per-calendar runtime rows are available. Next: run `reminderctl calendars` for explicit read-only registry discovery.")
         return
     for calendar in calendars:
         key = calendar.get("calendar_id", "(unknown calendar)")
@@ -168,4 +168,4 @@ journal = run(["journalctl", "--user", "-u", "calendar-reminder-overlay.service"
 if journal and journal.stdout.strip():
     print("Recent service warnings/errors:")
     print(journal.stdout.rstrip())
-print("Registry discovery is explicit only: run `reminder-setup-help` to list local EDS calendars. Diagnostics never initializes account setup or starts a service.")
+print("Registry discovery is explicit only: run `reminderctl calendars` to list local EDS calendars. Diagnostics never initializes account setup or starts a service.")

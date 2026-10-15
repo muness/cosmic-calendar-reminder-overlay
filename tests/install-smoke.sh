@@ -85,7 +85,7 @@ new_home fresh
 grep -Fq 'calendars = []' "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml"
 "$HOME/.local/bin/reminderctl" --config "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml" config-check \
   | grep -Fq '"valid": true'
-for command in reminder-demo reminder-setup-help reminder-diagnostics; do
+for command in reminder-demo reminder-diagnostics; do
   [[ -x "$HOME/.local/bin/$command" ]]
 done
 cp -p "$HOME/.local/bin/reminderctl" "$tmp/reminderctl-real"
@@ -105,12 +105,6 @@ chmod 0755 "$renderer"
 cat >"$HOME/.local/bin/reminderctl" <<'STUB'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${*: -2}" == 'calendars --json' ]]; then
-  cat <<'JSON'
-{"calendars":[{"source_id":"eds-local","calendar_id":"calendar-id-42","name":"Work calendar","account":"Personal account","provider":"local","selected":false}],"error":null}
-JSON
-  exit 0
-fi
 for argument in "$@"; do
   if [[ "$argument" == wait ]]; then
     echo '{"action":"dismiss","action_revision":1}'
@@ -128,13 +122,10 @@ cp "$config" "$tmp/config.before-demo"
 [[ ! -s "$DEMO_LOG" ]]
 "$HOME/.local/bin/reminder-demo" >"$tmp/demo-one.out"
 "$HOME/.local/bin/reminder-demo" --url 'https://example.test/open' >"$tmp/demo-two.out"
-"$HOME/.local/bin/reminder-setup-help" >"$tmp/setup-help.out"
 cmp "$tmp/config.before-demo" "$config"
 [[ ! -e "$XDG_STATE_HOME/calendar-reminder-overlay/alerts.sqlite3" ]]
 grep -Fq 'Preview reminder — no calendar event' "$tmp/demo-help.out"
 grep -Fq 'Starting synthetic preview preview:' "$tmp/demo-one.out"
-grep -Fq 'eds-local/calendar-id-42' "$tmp/setup-help.out"
-grep -Fq '# "eds-local/calendar-id-42", # Work calendar' "$tmp/setup-help.out"
 /usr/bin/python3 - "$DEMO_LOG" "$config" <<'PY'
 import json
 import pathlib
@@ -220,7 +211,7 @@ printf 'keep' >"$state"; printf 'legacy' >"$legacy"; printf 'keep' >"$unknown_in
 [[ -f "$config" && -f "$state" && -f "$legacy" && -f "$unknown_install" ]]
 [[ ! -e "$XDG_CONFIG_HOME/systemd/user/calendar-reminder-overlay.service" ]]
 [[ ! -e "$XDG_DATA_HOME/calendar-reminder-overlay/build/reminder-core" ]]
-[[ ! -e "$HOME/.local/bin/reminder-demo" && ! -e "$HOME/.local/bin/reminder-setup-help" && ! -e "$HOME/.local/bin/reminder-diagnostics" ]]
+[[ ! -e "$HOME/.local/bin/reminder-demo" && ! -e "$HOME/.local/bin/reminder-diagnostics" ]]
 not_contains "$SYSTEMCTL_LOG" 'disable --now evolution-dunst-reminders.service'
 contains "$tmp/uninstall.out" 'Kept user configuration and state'
 
@@ -247,7 +238,7 @@ dbus-run-session -- bash -euo pipefail -c '
   grep -Fq "Core owner: stopped or unavailable" "$HOME/diagnostics.out"
   grep -Fq "EDS integration: disabled" "$HOME/diagnostics.out"
   grep -Fq "No calendars are selected" "$HOME/diagnostics.out"
-  grep -Fq "reminder-setup-help" "$HOME/diagnostics.out"
+  grep -Fq "reminderctl calendars" "$HOME/diagnostics.out"
   [[ ! -e "$XDG_STATE_HOME/calendar-reminder-overlay/alerts.sqlite3" ]]
   ! busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core >/dev/null 2>&1
 '
