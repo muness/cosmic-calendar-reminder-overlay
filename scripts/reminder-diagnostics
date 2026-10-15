@@ -1,0 +1,195 @@
+#!/usr/bin/python3
+"""Read-only local installation and runtime diagnostics."""
+import argparse
+import collections
+import datetime
+import json
+import os
+import pathlib
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--verbose", action="store_true", help="include private event contents and service warnings; review before sharing")
+args = parser.parse_args()
+
+home = pathlib.Path.home()
+config_home = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+data_home = pathlib.Path(os.environ.get("XDG_DATA_HOME", home / ".local" / "share"))
+state_home = pathlib.Path(os.environ.get("XDG_STATE_HOME", home / ".local" / "state"))
+root = data_home / "calendar-reminder-overlay"
+config = config_home / "calendar-reminder-overlay" / "config.toml"
+helper = root / "src" / "reminderctl.py"
+core_state = state_home / "calendar-reminder-overlay" / "alerts.sqlite3"
+bus = "org.muness.CalendarReminderOverlay.Core"
+obj = "/org/muness/CalendarReminderOverlay/Core"
+iface = "org.muness.CalendarReminderOverlay.Core1"
+
+
+def run(argv):
+    try:
+        return subprocess.run(argv, check=False, capture_output=True, text=True)
+    except OSError as exc:
+        return None
+
+
+def busctl_call(method):
+    result = run([
+        "busctl", "--json=short", "--user", "--auto-start=no", "call",
+        bus, obj, iface, method,
+    ])
+    if result is None or result.returncode != 0:
+        return None
+    try:
+        envelope = json.loads(result.stdout)
+        data = envelope.get("data") if isinstance(envelope, dict) else None
+        if isinstance(data, list) and data and isinstance(data[0], str):
+            return data[0]
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    # systemd versions may print the regular typed representation despite the
+    # JSON request; D-Bus string values are JSON-quoted after the leading `s`.
+    output = result.stdout.strip()
+    if output.startswith("s "):
+        try:
+            return json.loads(output[2:])
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def pretty_policy(policy):
+    calendar = policy.get("calendar", {})
+    selection = policy.get("selection", {})
+    enabled = calendar.get("eds_enabled", False)
+    mode = selection.get("mode", "include")
+    selected = selection.get("calendars", [])
+    print(f"EDS integration: {'enabled' if enabled else 'disabled'}")
+    if not enabled:
+        print("  Next: set [calendar].eds_enabled = true only if you want EDS calendars.")
+    print(f"Follow Evolution selection: {"yes" if calendar.get("follow_selection", True) else "no (TOML selection still applies)"}")
+    print(f"Calendar selection: mode={mode}, {len(selected)} explicit key(s)")
+    if mode == "include" and not selected:
+        print("  No calendars are selected. Next: run `reminderctl calendars`, then add desired keys to [selection].calendars.")
+    elif selected or mode != "include":
+        print("  Registry discovery is not run by diagnostics. Next: run `reminderctl calendars` to inspect available keys explicitly.")
+    audio = policy.get("audio", {})
+    if not audio.get("enabled", False):
+        print("Audio: disabled. The isolated reminder-demo preview is always silent.")
+    else:
+        print("Audio: enabled for normal reminders. The isolated reminder-demo preview stays silent.")
+
+
+def print_core_diagnostics(raw):
+    try:
+        data = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        print("Core Diagnostics response is not valid JSON:", raw)
+        return
+    if not isinstance(data, dict):
+        print("Core Diagnostics response has an unknown shape:", raw)
+        return
+    presentation = data.get("presentation_enabled")
+    print(f"Reminder presentation: {"on" if presentation is True else "off (calendars still sync)" if presentation is False else "unknown"}")
+    enabled = data.get("eds_enabled")
+    print(f"Runtime EDS integration: {'enabled' if enabled else 'disabled' if enabled is False else 'unknown'}")
+    print(f"Calendar registry: {data.get("registry_state", "unknown")}; active fetches: {data.get("active_scans", "unknown")}")
+    calendars = data.get("calendars", [])
+    if not calendars:
+        if enabled:
+            print("  No per-calendar runtime rows are available. Next: run `reminderctl calendars` for explicit read-only registry discovery.")
+        return
+    for calendar in calendars:
+        key = calendar.get("calendar_id", "(unknown calendar)")
+        state = calendar.get("state", "unknown")
+        events = calendar.get("events", "unknown")
+        error = calendar.get("error")
+        success = calendar.get("last_success_unix")
+        try:
+            synced = datetime.datetime.fromtimestamp(success).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if success else "never"
+        except (ValueError, TypeError, OSError):
+            synced = "unknown"
+        selected = "" if calendar.get("selected", True) else " (not selected)"
+        print(f"  {key}{selected}: {state}; events={events}; last sync: {synced}")
+        if state == "stale":
+            print("    Next: check that the desktop calendar account is online, then inspect `journalctl --user -u calendar-reminder-overlay.service`.")
+        elif state == "error":
+            print(f"    Source error: {error or 'unspecified'}; next: check the account/provider and service journal.")
+        elif state not in ("fresh",):
+            print("    Next: check the service journal for this calendar's fetch status.")
+
+
+print(f"Install root: {root}")
+print(f"Config: {config}")
+print(f"State DB: {core_state}")
+for path in (root / "build" / "reminder-core", root / "build" / "calendar-reminder-overlay", helper, config, core_state):
+    print(f"{'Present' if path.exists() else 'Missing'}: {path}")
+
+if helper.exists():
+    checked = run(["/usr/bin/python3", str(helper), "--config", str(config), "config-check"])
+    if checked and checked.returncode == 0:
+        print("Configuration: valid")
+        try:
+            pretty_policy(json.loads(checked.stdout))
+        except json.JSONDecodeError:
+            print("Configuration summary unavailable: config-check returned invalid JSON.")
+    else:
+        detail = checked.stderr.strip() if checked else "could not execute /usr/bin/python3"
+        print(f"Configuration: invalid or unavailable ({detail})")
+        print("  Next: edit the reported TOML file and run `reminderctl config-check`.")
+else:
+    print("Configuration validation unavailable: installed helper is missing.")
+
+renderer = root / "build" / "calendar-reminder-overlay"
+if renderer.exists():
+    result = run([str(renderer), "--capabilities"])
+    if result and result.returncode == 0:
+        try:
+            capabilities = json.loads(result.stdout)
+            print("Renderer capability evidence:", json.dumps(capabilities, sort_keys=True))
+            if capabilities.get("monitors") == []:
+                print("  No display monitors were detected. Next: run diagnostics in the target graphical session; this headless result is not evidence of desktop incompatibility.")
+            if capabilities.get("layer_shell_supported") is False:
+                print("  Layer Shell is unavailable; the fullscreen fallback does not prove above-fullscreen behavior. Check the desktop compatibility notes.")
+        except json.JSONDecodeError:
+            print("Renderer capability output was not valid JSON:", result.stdout.strip())
+    else:
+        detail = result.stderr.strip() if result else "could not execute renderer"
+        print(f"Renderer capability probe unavailable: {detail}")
+        print("  Next: run this command in the target graphical session; verify GTK/Layer Shell runtime libraries. A headless failure is not runtime proof.")
+else:
+    print("Renderer capability unavailable: installed renderer is missing.")
+
+owner = run(["busctl", "--user", "--no-pager", "status", bus])
+if owner and owner.returncode == 0:
+    print("Core owner: running")
+    alerts = busctl_call("List")
+    if alerts is None:
+        print("Core alert list unavailable (stopped during query or this version lacks List).")
+    else:
+        if args.verbose:
+            print("Core alerts (private event details):", alerts)
+        else:
+            try:
+                counts = collections.Counter(row.get("state", "unknown") for row in json.loads(alerts))
+                print("Core alerts:", ", ".join(f"{count} {state}" for state, count in sorted(counts.items())) or "none")
+                print("  Event contents omitted. Use --verbose only when needed; review before sharing.")
+            except (ValueError, TypeError, AttributeError):
+                print("Core alert summary unavailable; use --verbose to inspect the response.")
+    runtime = busctl_call("Diagnostics")
+    if runtime is None:
+        print("Core source freshness unavailable (stopped during query or this version lacks Diagnostics).")
+        print("  Next: check `journalctl --user -u calendar-reminder-overlay.service`.")
+    else:
+        print("Core source diagnostics:")
+        print_core_diagnostics(runtime)
+else:
+    print("Core owner: stopped or unavailable; no service was started.")
+    print("  Runtime alert/source freshness is unavailable. After reviewing config, activate from a graphical session with `./install.sh --activate`.")
+
+service = run(["systemctl", "--user", "is-active", "calendar-reminder-overlay.service"])
+print(f"User service: {service.stdout.strip() if service and service.returncode == 0 else 'inactive or unavailable'}")
+journal = run(["journalctl", "--user", "-u", "calendar-reminder-overlay.service", "-p", "warning", "--no-pager", "-n", "20"])
+if args.verbose and journal and journal.stdout.strip():
+    print("Recent service warnings/errors:")
+    print(journal.stdout.rstrip())
+print("Registry discovery is explicit only: run `reminderctl calendars` to list local EDS calendars. Diagnostics never initializes account setup or starts a service.")

@@ -1,0 +1,31 @@
+#!/usr/bin/python3
+"""Open reminder configuration with the desktop's default text editor."""
+import os
+import pathlib
+import sys
+
+from gi.repository import Gio, GLib
+
+# Panel applets receive a private Wayland socket. Normal editor windows must
+# connect through the desktop's WAYLAND_DISPLAY instead.
+os.environ.pop("WAYLAND_SOCKET", None)
+
+config = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".config")) / "calendar-reminder-overlay" / "config.toml"
+if not config.is_file():
+    sys.exit(f"Settings file is missing: {config}. Run ./install.sh first.")
+editor = Gio.AppInfo.get_default_for_type("text/plain", False)
+if editor is None:
+    sys.exit("No default text editor is configured. Choose a default app for plain text files in your desktop settings, then try again.")
+try:
+    # Editors may remain running after this helper exits. They must not retain
+    # the applet's captured stdout/stderr and keep its launch request pending.
+    with open(os.devnull, "r+b") as detached:
+        launched = editor.launch_uris_as_manager_with_fds(
+            [Gio.File.new_for_path(str(config)).get_uri()], None,
+            GLib.SpawnFlags.SEARCH_PATH, None, None, None, None,
+            detached.fileno(), detached.fileno(), detached.fileno(),
+        )
+    if not launched:
+        sys.exit("The default editor could not open settings. Check your desktop's default text editor and try again.")
+except GLib.Error as exc:
+    sys.exit(f"Could not open settings in the default editor: {exc.message}")

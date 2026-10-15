@@ -1,0 +1,94 @@
+# Calendar Reminder Overlay settings
+# Lines starting with # are comments; they do not change behavior.
+#
+# Quick start using the calendars already checked in Evolution:
+#   1. Confirm your events appear in Evolution's Calendar view.
+#   2. Set calendar.eds_enabled = true and selection.mode = "all" below.
+#   3. Save, then click Apply settings in the panel applet.
+#      From a terminal: reminderctl config-check && reminderctl reload
+#
+# The applet's On/Off switch is stored separately and survives restarts.
+# Editing this file does not turn that switch on or off.
+version = 1
+
+[calendar]
+# true: read your existing Evolution Data Server (EDS) calendars.
+# false: no calendar connection; CLI reminders still work.
+# This app does not sign in to accounts. Connect/sync them in Evolution first.
+eds_enabled = false
+
+# true: only calendars checked in Evolution are eligible for reminders.
+# false: ignore those checkboxes and use the TOML selection below instead.
+# Disabled calendars/accounts are excluded in either case.
+follow_selection = true
+
+[selection]
+# "all"     = every eligible calendar; calendars must be [].
+# "include" = only calendars whose keys are listed below.
+# "exclude" = every eligible calendar except the keys listed below.
+# An empty "include" list selects NONE; an empty "exclude" list excludes none.
+# Evolution's checkboxes still apply when calendar.follow_selection = true.
+# Start with "all" to follow your existing Evolution selection.
+mode = "include"
+
+# Find exact keys with: reminderctl calendars
+# Example for include/exclude: ["eds-local/YOUR-CALENDAR-ID"]
+# Keep [] for mode = "all". No made-up example calendar is selected by default.
+calendars = []
+
+[reminders]
+# For events without a native/default calendar alarm, remind this many minutes
+# before the start. Integer from 1 to 120; native alarms take precedence.
+fallback_lead_minutes = 5
+
+[snooze]
+# Visible snooze-button choices, in minutes. Use one or more integers, 1–10080.
+# Example: [5, 10, 15]. "Until event starts" is offered separately when possible.
+minutes = [1, 5]
+
+[display]
+# "native"     = compositor overlay via Layer Shell (recommended for COSMIC).
+# "fullscreen" = ordinary fullscreen window; stacking depends on your desktop.
+# GNOME needs the separate experimental helper; fullscreen alone is not a
+# guarantee that reminders appear above other fullscreen applications.
+backend = "native"
+
+# "all" = every connected output; "first" = first output reported by GTK.
+# "connector:NAME" = one exact connector, for example "connector:eDP-1".
+# Find connector names with: reminder-diagnostics
+# "first" does not mean your desktop's designated primary display.
+outputs = "all"
+
+[appearance]
+# "default" = the app's default dark palette; "dark" = dark; "light" = light.
+theme = "default"
+
+[audio]
+# true: play an audible alert while a reminder is presented; false: silent.
+# The global On/Off switch suppresses both overlays and sound.
+enabled = false
+
+# "" uses the built-in tone. Otherwise use an absolute path to an audio file
+# supported by PipeWire's pw-play, for example "/home/me/Sounds/reminder.wav".
+# A leading ~ is not expanded. Sound requires pw-play to be installed.
+file = ""
+
+# 0 = play once; 1–3600 = repeat at that interval in seconds.
+repeat_seconds = 0
+
+# Playback level from 0.0 (silent) to 1.0 (full). System volume is not changed.
+volume = 0.5
+
+# Optional per-calendar overrides. Everything below is commented out.
+# Copy a block, remove its leading # characters, and replace YOUR-CALENDAR-ID
+# with an exact key from reminderctl calendars. Omitted keys inherit globals.
+# An override does not select a calendar; [selection] and Evolution still apply.
+#
+# [calendar_overrides."eds-local/YOUR-CALENDAR-ID"]
+# fallback_enabled = false       # false disables fallback alarms, not native ones
+# fallback_lead_minutes = 10     # 1–120, when fallback is enabled
+# snooze_minutes = [5, 15]       # same range as [snooze].minutes
+# audio_enabled = true          # enable sound for this calendar
+# audio_file = ""               # built-in tone, or an absolute audio-file path
+# audio_repeat_seconds = 30     # 0 = once; 1–3600 seconds = repeat
+# audio_volume = 0.5            # 0.0–1.0

@@ -1,0 +1,14 @@
+[package]
+name = "cosmic-ext-applet-reminders"
+version = "0.1.0"
+edition = "2024"
+description = "Enable or disable calendar reminder overlays from the COSMIC panel"
+publish = false
+
+[dependencies]
+libcosmic = { git = "https://github.com/pop-os/libcosmic", rev = "e1f2cd2e52226aa50d59bb2cd6d43ffe290106ed", default-features = false, features = ["applet"] }
+tokio = { version = "1", features = ["time", "process"] }
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[profile.release]
+strip = true

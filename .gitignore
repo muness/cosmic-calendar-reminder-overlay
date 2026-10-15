@@ -1,2 +1,7 @@
 *.o
 *.core
+
+build/
+__pycache__/
+*.pyc
+applet/target/

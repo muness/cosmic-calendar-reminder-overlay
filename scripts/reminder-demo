@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: reminder-demo [--url URL]
+
+Show a fresh, silent synthetic reminder in an isolated core and temporary
+state/config. Its alert is titled “Preview reminder — no calendar event”; it
+creates no calendar event and does not change your settings.
+Open is offered only when you supply --url, and it is launched only if you
+choose Open in the alert. Keep this terminal open if you snooze the preview;
+the isolated core stays alive until you dismiss it, open its link, or press
+Ctrl+C.
+USAGE
+}
+
+if [[ "${REMINDER_DEMO_PRIVATE:-}" == true ]]; then
+  temp_dir="${REMINDER_DEMO_TEMP:?}"
+  alert_id="${REMINDER_DEMO_ID:?}"
+  demo_url="${REMINDER_DEMO_URL:-}"
+  home="${HOME:?HOME must be set}"
+  data_home="${XDG_DATA_HOME:-${home}/.local/share}"
+  install_root="${data_home}/calendar-reminder-overlay"
+  cli="${home}/.local/bin/reminderctl"
+  core="${install_root}/build/reminder-core"
+  helper="${install_root}/src/reminderctl.py"
+  renderer="${install_root}/build/calendar-reminder-overlay"
+  config="${temp_dir}/config.toml"
+  state="${temp_dir}/state/alerts.sqlite3"
+
+  [[ -x "$core" && -x "$renderer" && -f "$helper" && -x "$cli" ]] || {
+    echo 'Installed core, renderer, helper, and reminderctl are required; run install.sh first.' >&2
+    exit 1
+  }
+  cat >"$config" <<'CONFIG'
+version = 1
+
+[selection]
+mode = "include"
+calendars = []
+
+[calendar]
+eds_enabled = false
+
+[audio]
+enabled = false
+file = ""
+repeat_seconds = 0
+volume = 0.5
+CONFIG
+  chmod 0600 "$config"
+
+  capabilities="$("$renderer" --capabilities 2>&1)" || {
+    printf '%s\n' "$capabilities" >&2
+    echo 'The renderer could not open the graphical display. Run reminder-demo from the target desktop session.' >&2
+    exit 1
+  }
+  if ! /usr/bin/python3 -c 'import json,sys; value=json.loads(sys.argv[1]); raise SystemExit(0 if value.get("monitors") else 1)' "$capabilities"; then
+    echo 'The renderer detected no display monitors. Run reminder-demo from the target graphical session.' >&2
+    exit 1
+  fi
+
+  "$core" --headless --state "$state" --config "$config" --helper "$helper" --overlay "$renderer" >"${temp_dir}/core.log" 2>&1 &
+  core_pid=$!
+  ui_pid=''
+  cleaned=false
+  # The cleanup function is invoked by the EXIT trap below.
+  # shellcheck disable=SC2329
+  cleanup() {
+    [[ "$cleaned" == true ]] && return
+    cleaned=true
+    if [[ -n "$ui_pid" ]]; then
+      kill "$ui_pid" 2>/dev/null || true
+      wait "$ui_pid" 2>/dev/null || true
+    fi
+    kill "$core_pid" 2>/dev/null || true
+    wait "$core_pid" 2>/dev/null || true
+  }
+  trap cleanup EXIT
+  trap 'exit 130' INT TERM
+
+  ready=false
+  for _ in {1..50}; do
+    if busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core >/dev/null 2>&1; then
+      ready=true
+      break
+    fi
+    sleep 0.1
+  done
+  if [[ "$ready" != true ]]; then
+    cat "${temp_dir}/core.log" >&2
+    echo 'Could not start isolated preview core.' >&2
+    exit 1
+  fi
+
+  args=(--config "$config" notify "$alert_id" 'Preview reminder — no calendar event' \
+    --body 'This is a synthetic preview. No calendar event was created. Dismiss it from the overlay.')
+  if [[ -n "$demo_url" ]]; then
+    args+=(--url "$demo_url")
+  fi
+  "$cli" "${args[@]}"
+  "$renderer" --watch >"${temp_dir}/renderer.log" 2>&1 &
+  ui_pid=$!
+  sleep 0.2
+  if ! kill -0 "$ui_pid" 2>/dev/null; then
+    cat "${temp_dir}/renderer.log" >&2
+    echo 'The preview renderer exited before it could show the alert.' >&2
+    exit 1
+  fi
+  echo 'Preview is running with temporary config and state on a private D-Bus. Dismiss it to finish; snooze keeps this isolated preview alive until it returns.'
+  action_revision=0
+  while true; do
+    response="$("$cli" --config "$config" wait "$alert_id" --after-revision "$action_revision")"
+    action="$(/usr/bin/python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("action", ""))' "$response")"
+    next_revision="$(/usr/bin/python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("action_revision", 0))' "$response")"
+    case "$action" in
+      dismiss|open)
+        echo "Preview finished with action: $action. Temporary state will be removed."
+        break
+        ;;
+      snooze|snooze-until)
+        action_revision="$next_revision"
+        echo 'Preview snoozed. Keep this terminal open; the isolated core will show it again when the snooze expires.'
+        ;;
+      *)
+        echo "Unexpected preview action '${action:-none}'; leaving core alive for safe manual cleanup with Ctrl+C." >&2
+        action_revision="$next_revision"
+        ;;
+    esac
+  done
+  exit 0
+fi
+
+demo_url=''
+while (($#)); do
+  case "$1" in
+    --url)
+      (($# >= 2)) || { usage >&2; exit 2; }
+      demo_url="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *) usage >&2; exit 2 ;;
+  esac
+done
+
+command -v dbus-run-session >/dev/null || { echo 'dbus-run-session is required for an isolated preview.' >&2; exit 1; }
+temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/calendar-reminder-preview.XXXXXX")"
+trap 'rm -rf -- "$temp_dir"' EXIT
+alert_id="preview:$(/usr/bin/python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+export REMINDER_DEMO_PRIVATE=true REMINDER_DEMO_TEMP="$temp_dir" REMINDER_DEMO_ID="$alert_id" REMINDER_DEMO_URL="$demo_url"
+demo_script="${HOME:?HOME must be set}/.local/bin/reminder-demo"
+echo "Starting synthetic preview ${alert_id}. Your installed config, accounts, reminders, and notification services are not used or changed."
+if [[ -n "$demo_url" ]]; then
+  echo 'The supplied link is available only through the alert Open button; it is not opened automatically.'
+fi
+dbus-run-session -- "$demo_script"
