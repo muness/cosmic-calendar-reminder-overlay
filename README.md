@@ -58,3 +58,70 @@ See [the problem-space and reuse audit](docs/attention-overlay-research.md) for 
 ## Epic and implementation plan
 
 [The epic](https://github.com/muness/cosmic-calendar-reminder-overlay/issues/1) tracks the selected top-level capability issues. [The planning record](docs/attention-overlay-plan.md) preserves the Aim, independent problem frames, selected S&T steps, dependencies, evidence gates and deferred alternatives.
+
+## Local alert core preview
+
+The local core is a separate, private session-D-Bus API. It does not own
+`org.freedesktop.Notifications`, and generic alerts work without EDS. Its
+SQLite state defaults to `$XDG_STATE_HOME/calendar-reminder-overlay/alerts.sqlite3`.
+Set `REMINDER_STATE_HOME` to isolate it. `reminderctl.py` starts the core on
+first use, and the sender can exit without losing the alert or its action result.
+
+Build both native binaries and run the isolated lifecycle checks:
+
+```sh
+make
+make check
+```
+
+Submit/update/cancel/status/list and wait for an action result:
+
+```sh
+src/reminderctl.py notify timer:tea "Tea is ready" --body "Take the kettle off"
+src/reminderctl.py update timer:tea "Tea is ready now"
+src/reminderctl.py status timer:tea
+src/reminderctl.py wait timer:tea --after-revision 1 --timeout 300
+src/reminderctl.py cancel timer:tea
+```
+
+Structured JSON input is accepted for `notify` and `update`; the core enforces
+selection again at its D-Bus admission boundary when `source_id` and
+`calendar_id` are supplied:
+
+```sh
+printf '%s\n' '{"id":"hook:build","title":"Build finished","body":"Review the result","destination":"https://example.org","source_id":"eds-local","calendar_id":"backend-id"}' \
+  | src/reminderctl.py notify --json
+```
+
+`wait` observes the durable result written by the UI (`open`, `dismiss`, or
+`snooze`); it does not cancel the alert when the producer exits. Alert IDs must
+be namespaced, for example `timer:tea` or `homelab:garage-door`. Actions carry
+the revision shown by `status`; an old revision is rejected. Expiry is a Unix
+timestamp. Snooze deadline and action result survive core restarts. Snoozed
+alerts become active when the deadline poll observes their persisted deadline;
+expired alerts do not replay. `wait --after-revision` compares the stored action
+revision, so a later content update does not masquerade as another user action.
+
+To show a submitted synthetic alert in the existing large GTK overlay, run:
+
+```sh
+src/reminderctl.py notify synthetic:demo "Synthetic reminder" --body "The GTK UI is reusing its large action layout" --url https://example.org --show
+```
+
+The Open button records success only after the destination launcher accepts
+the URI. A failed launch leaves the alert active. The CLI's `act ... open`
+also launches the destination before recording the result.
+
+Synthetic mode does not initialize the EDS registry. The current EDS path is
+still the prototype path and has not yet been converted to the TOML selector.
+
+Configuration uses strict, versioned TOML; see [config.example.toml](config.example.toml).
+The default path is `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml`.
+`config-check` rejects unknown keys and out-of-range values. Calendar selection
+uses `source-id/calendar-id` pairs: include mode with an empty list selects
+nothing, exclude mode selects everything except listed pairs, and all mode
+requires an empty list. `check-selection` exercises the same matcher without
+connecting to EDS; the core enforces its active policy and rejects unselected source submissions.
+Use `reminderctl.py --config PATH reload` to explicitly change daemon policy;
+read-only CLI calls never replace it. Audio fields are validated but report as unavailable, and
+calendar listing is pending the next EDS adapter group.

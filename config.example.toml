@@ -1,0 +1,25 @@
+version = 1
+
+# An empty include list means no EDS calendars are selected. The EDS adapter
+# will apply this policy to both native alarms and fallback scans.
+[selection]
+mode = "include" # include, exclude, or all
+calendars = ["eds-local/8f1f2c7e-opaque-backend-id"]
+
+[reminders]
+fallback_lead_minutes = 5 # 1 through 120
+
+[snooze]
+minutes = [1, 5] # 1 through 10080
+
+[display]
+backend = "native" # native or fullscreen
+outputs = "all" # all or primary
+
+[appearance]
+theme = "default" # default, dark, or light
+
+[audio]
+enabled = false
+file = ""
+repeat_seconds = 0
