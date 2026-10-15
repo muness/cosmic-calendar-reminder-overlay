@@ -90,10 +90,11 @@ new_home uninstall
 config="$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml"
 state="$XDG_DATA_HOME/calendar-reminder-overlay/state/keep.db"
 legacy="$HOME/.local/bin/evolution-dunst-reminders"
+unknown_install="$XDG_DATA_HOME/calendar-reminder-overlay/user-notes.txt"
 mkdir -p "$(dirname "$state")" "$HOME/.local/bin"
-printf 'keep' >"$state"; printf 'legacy' >"$legacy"
+printf 'keep' >"$state"; printf 'legacy' >"$legacy"; printf 'keep' >"$unknown_install"
 "$root/uninstall.sh" >"$tmp/uninstall.out"
-[[ -f "$config" && -f "$state" && -f "$legacy" ]]
+[[ -f "$config" && -f "$state" && -f "$legacy" && -f "$unknown_install" ]]
 [[ ! -e "$XDG_CONFIG_HOME/systemd/user/calendar-reminder-overlay.service" ]]
 [[ ! -e "$XDG_DATA_HOME/calendar-reminder-overlay/build/reminder-core" ]]
 not_contains "$SYSTEMCTL_LOG" 'disable --now evolution-dunst-reminders.service'
@@ -105,9 +106,11 @@ new_home purge
 state="${HOME}/.local/state/calendar-reminder-overlay/alerts.sqlite3"
 mkdir -p "$(dirname "$state")"
 printf 'state' >"$state"
+printf 'keep' >"$(dirname "$state")/user-notes.txt"
 "$root/uninstall.sh" --purge >"$tmp/purge.out"
 [[ ! -e "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml" ]]
 [[ ! -e "$state" ]]
+[[ -f "$(dirname "$state")/user-notes.txt" ]]
 contains "$tmp/purge.out" 'Purged its config and state directory'
 
 printf 'install-smoke: fresh stage, config preservation, fresh activation, legacy migration, restart, and uninstall passed\n'

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+: "${HOME:?HOME must be set}"
 
 usage() { printf 'Usage: %s [--activate]\n' "${0##*/}"; }
 activate=false
@@ -90,7 +91,9 @@ else
   echo 'Unavailable: installed renderer does not expose --capabilities.'
 fi
 echo 'Installed core bus owner (runtime evidence):'
-if command -v busctl >/dev/null && busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core >/dev/null 2>&1; then
+if ! command -v busctl >/dev/null; then
+  echo 'Core owner status unavailable: busctl is not installed.'
+elif busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core >/dev/null 2>&1; then
   busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core | sed -n '1,5p'
   echo 'Core alerts/state (read-only CLI query):'
   /usr/bin/python3 "$root/src/reminderctl.py" --config "$config" \

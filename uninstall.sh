@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+: "${HOME:?HOME must be set}"
 purge=false
 while (($#)); do
   case "$1" in
@@ -12,7 +13,7 @@ done
 
 config_home="${XDG_CONFIG_HOME:-${HOME:?HOME must be set}/.config}"
 data_home="${XDG_DATA_HOME:-${HOME:?HOME must be set}/.local/share}"
-state_home="${XDG_STATE_HOME:-${HOME}/.local/state}"
+state_dir="${REMINDER_STATE_HOME:-${XDG_STATE_HOME:-${HOME}/.local/state}/calendar-reminder-overlay}"
 unit="${config_home}/systemd/user/calendar-reminder-overlay.service"
 if command -v systemctl >/dev/null; then
   systemctl --user disable --now calendar-reminder-overlay.service >/dev/null 2>&1 || true
@@ -31,7 +32,8 @@ rmdir "${data_home}/calendar-reminder-overlay/build" \
 if [[ "$purge" == true ]]; then
   rm -f "${config_home}/calendar-reminder-overlay/config.toml"
   rmdir "${config_home}/calendar-reminder-overlay" 2>/dev/null || true
-  rm -rf "${state_home}/calendar-reminder-overlay" "${data_home}/calendar-reminder-overlay"
+  rm -f "${state_dir}/alerts.sqlite3" "${state_dir}/alerts.sqlite3-wal" "${state_dir}/alerts.sqlite3-shm"
+  rmdir "$state_dir" 2>/dev/null || true
 fi
 if command -v systemctl >/dev/null; then systemctl --user daemon-reload >/dev/null 2>&1 || true; fi
 echo 'Removed calendar-reminder-overlay files and its user unit.'
