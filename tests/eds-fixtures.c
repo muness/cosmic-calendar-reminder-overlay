@@ -143,5 +143,20 @@ main (void)
 	events = reminder_eds_expand_ics ("calendar-uid", bad_tz, utc, 1792022400, 1792368000, FALSE, &error);
 	if (events || !error) { g_printerr ("unknown event timezone was not rejected\n"); return 4; }
 	g_clear_error (&error);
+	const gchar *iana_zones[] = { "America/New_York", "America/Toronto" };
+	for (guint i = 0; i < G_N_ELEMENTS (iana_zones); i++) {
+		gchar *iana_ics = g_strdup_printf (
+			"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:iana-%u\r\n"
+			"DTSTART;TZID=%s:20261015T090000\r\nDTEND;TZID=%s:20261015T100000\r\n"
+			"END:VEVENT\r\nEND:VCALENDAR\r\n", i, iana_zones[i], iana_zones[i]);
+		events = reminder_eds_expand_ics ("calendar-uid", iana_ics, utc, 1792022400, 1792368000, FALSE, &error);
+		g_free (iana_ics);
+		if (!events || events->len != 1 || ((ReminderEdsEvent *) g_ptr_array_index (events, 0))->start != 1792069200) {
+			g_printerr ("IANA event timezone %s was not resolved to the expected local time: %s\n",
+				iana_zones[i], error ? error->message : "unexpected occurrence result");
+			g_clear_pointer (&events, g_ptr_array_unref); g_clear_error (&error); return 14;
+		}
+		g_ptr_array_unref (events);
+	}
 	return 0;
 }

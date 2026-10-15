@@ -17,7 +17,12 @@ resolve_timezone (const gchar *tzid, gpointer user_data, GCancellable *cancellab
 	ICalTimezone *zone = expansion && expansion->calendar ? i_cal_component_get_timezone (expansion->calendar, tzid) : NULL;
 	(void) cancellable;
 	if (zone) g_ptr_array_add (expansion->owned_zones, zone);
-	else zone = i_cal_timezone_get_builtin_timezone_from_tzid (tzid);
+	else {
+		zone = i_cal_timezone_get_builtin_timezone_from_tzid (tzid);
+		/* Some installed libical timezone registries index Olson IDs by
+		 * location rather than the TZID lookup table. */
+		if (!zone) zone = i_cal_timezone_get_builtin_timezone (tzid);
+	}
 	if (!zone)
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "Unknown event timezone '%s'; preserving the previous calendar snapshot", tzid);
 	return zone;
