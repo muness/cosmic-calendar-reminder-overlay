@@ -31,7 +31,25 @@ Add `~/.local/bin` to your PATH if these commands are not found without the full
 
 First, connect your account in your desktop's Online Accounts or Evolution, and confirm that events appear in Evolution's Calendar view. This app reads calendars already available through EDS; it does not implement Google or Microsoft sign-in. Provider support depends on your EDS account setup. KDE's Akonadi accounts are [not connected yet](docs/akonadi-discovery.md).
 
-### Choose calendars
+### Follow Evolution's calendar selection
+
+The default `calendar.follow_selection = true` follows the calendars checked in Evolution. To use those calendars without maintaining a second selection list, edit your TOML to:
+
+```toml
+version = 1
+
+[calendar]
+eds_enabled = true
+follow_selection = true
+
+[selection]
+mode = "all"
+calendars = []
+```
+
+Checking or unchecking an EDS calendar in Evolution changes reminder eligibility. A disabled account/calendar is excluded as well. This app reads that selection; it does not change it.
+
+### Optional: narrow the selection further
 
 ```sh
 ~/.local/bin/reminderctl calendars
@@ -56,7 +74,7 @@ calendars = ["eds-local/YOUR-CALENDAR-ID"] # replace with a key from the list
 eds_enabled = true
 ```
 
-List multiple keys to select multiple calendars. An empty include list selects none. Use `mode = "all"` only if you want every enabled EDS calendar, including holiday calendars. Installing again preserves your configuration.
+List multiple keys to select multiple calendars. An empty include list selects none. TOML selection is intersected with Evolution’s checked calendars by default. For reminders from an explicitly configured calendar even while it is unchecked in Evolution, set `[calendar].follow_selection = false`. Source enablement still applies. Installing again preserves your configuration.
 
 ### Start reminders
 
@@ -92,7 +110,26 @@ Reuse an ID to address the same reminder; choose a fresh ID for a separate one. 
 
 `reminderctl --help` lists update, action, and wait commands for integrations.
 
-## Change settings or stop reminders
+## Panel controls and settings
+
+For a native COSMIC panel control, install the optional applet (requires Rust/Cargo and a development environment for libcosmic):
+
+```sh
+./install.sh --with-applet --activate
+```
+
+Add **Reminder Controls** in **COSMIC Settings → Desktop → Panel → Applets**. Its popup has a **Reminders on/off** switch and **Open settings**, which uses your desktop's default plain-text editor. After saving, return to the popup and click **Apply settings**. Invalid settings show an error and leave the last working policy in place. A stopped or unreachable service is shown as unavailable, not as reminders being off.
+
+Turning reminders off suppresses overlays and audio while calendars keep syncing. The choice survives a service restart and does not dismiss provider alarms. Calendar browsing stays in the existing calendar applet. There is no timed pause or agenda in this control.
+
+The same controls work from a terminal:
+
+```sh
+~/.local/bin/reminderctl disable
+~/.local/bin/reminderctl enable
+~/.local/bin/reminderctl presentation-status
+~/.local/bin/reminder-settings
+```
 
 After editing TOML, validate it and explicitly reload the running service:
 
@@ -114,7 +151,7 @@ To turn off automatic startup as well:
 systemctl --user disable --now calendar-reminder-overlay.service
 ```
 
-These are service controls, not a timed pause: the service does not monitor calendars while stopped. CLI commands that need the core can start it again. A small [panel control for turning reminders on/off](docs/applet-control.md) is proposed; calendar browsing stays in the existing calendar applet. It is not included yet.
+Stopping the service also stops calendar monitoring. Use the applet or `reminderctl disable` when you only want to suppress overlays and sound. CLI commands that need the core can start a stopped core again. See [panel control details](docs/applet-control.md).
 
 ## Troubleshooting
 
@@ -136,7 +173,7 @@ Diagnostics does not start the service or set up accounts. Its normal output sum
 
 ## Update or uninstall
 
-From an updated checkout, rerun `./install.sh --activate`. This rebuilds, preserves configuration and state, and restarts the service with the new version. `./install.sh` alone stages files without restarting an already-running service.
+From an updated checkout, rerun `./install.sh --activate` (or `./install.sh --with-applet --activate` to update the optional applet too). This rebuilds, preserves configuration and state, and restarts the service with the new version. `./install.sh` alone stages files without restarting an already-running service.
 
 ```sh
 ./uninstall.sh

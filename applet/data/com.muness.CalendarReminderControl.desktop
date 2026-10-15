@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Reminder Controls
+Comment=Turn calendar reminder overlays on or off and edit their settings
+Exec=cosmic-ext-applet-reminders
+Icon=alarm-symbolic
+Terminal=false
+Categories=COSMIC;Utility;
+Keywords=Calendar;Reminders;Alarm;
+NoDisplay=true
+StartupNotify=true
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
