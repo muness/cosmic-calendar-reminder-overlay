@@ -1,9 +1,16 @@
 #!/usr/bin/python3
 """Read-only local installation and runtime diagnostics."""
+import argparse
+import collections
+import datetime
 import json
 import os
 import pathlib
 import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--verbose", action="store_true", help="include private event contents and service warnings; review before sharing")
+args = parser.parse_args()
 
 home = pathlib.Path.home()
 config_home = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
@@ -66,9 +73,9 @@ def pretty_policy(policy):
         print("  Registry discovery is not run by diagnostics. Next: run `reminderctl calendars` to inspect available keys explicitly.")
     audio = policy.get("audio", {})
     if not audio.get("enabled", False):
-        print("Audio: disabled by config; the preview is silent unless you enable it.")
+        print("Audio: disabled. The isolated reminder-demo preview is always silent.")
     else:
-        print("Audio: enabled by config; an explicitly requested preview may play your configured sound.")
+        print("Audio: enabled for normal reminders. The isolated reminder-demo preview stays silent.")
 
 
 def print_core_diagnostics(raw):
@@ -82,6 +89,7 @@ def print_core_diagnostics(raw):
         return
     enabled = data.get("eds_enabled")
     print(f"Runtime EDS integration: {'enabled' if enabled else 'disabled' if enabled is False else 'unknown'}")
+    print(f"Calendar registry: {data.get("registry_state", "unknown")}; active fetches: {data.get("active_scans", "unknown")}")
     calendars = data.get("calendars", [])
     if not calendars:
         if enabled:
@@ -93,7 +101,12 @@ def print_core_diagnostics(raw):
         events = calendar.get("events", "unknown")
         error = calendar.get("error")
         success = calendar.get("last_success_unix")
-        print(f"  {key}: {state}; events={events}; last_success_unix={success}")
+        try:
+            synced = datetime.datetime.fromtimestamp(success).astimezone().strftime("%Y-%m-%d %H:%M:%S %Z") if success else "never"
+        except (ValueError, TypeError, OSError):
+            synced = "unknown"
+        selected = "" if calendar.get("selected", True) else " (not selected)"
+        print(f"  {key}{selected}: {state}; events={events}; last sync: {synced}")
         if state == "stale":
             print("    Next: check that the desktop calendar account is online, then inspect `journalctl --user -u calendar-reminder-overlay.service`.")
         elif state == "error":
@@ -150,7 +163,15 @@ if owner and owner.returncode == 0:
     if alerts is None:
         print("Core alert list unavailable (stopped during query or this version lacks List).")
     else:
-        print("Core alerts:", alerts)
+        if args.verbose:
+            print("Core alerts (private event details):", alerts)
+        else:
+            try:
+                counts = collections.Counter(row.get("state", "unknown") for row in json.loads(alerts))
+                print("Core alerts:", ", ".join(f"{count} {state}" for state, count in sorted(counts.items())) or "none")
+                print("  Event contents omitted. Use --verbose only when needed; review before sharing.")
+            except (ValueError, TypeError, AttributeError):
+                print("Core alert summary unavailable; use --verbose to inspect the response.")
     runtime = busctl_call("Diagnostics")
     if runtime is None:
         print("Core source freshness unavailable (stopped during query or this version lacks Diagnostics).")
@@ -165,7 +186,7 @@ else:
 service = run(["systemctl", "--user", "is-active", "calendar-reminder-overlay.service"])
 print(f"User service: {service.stdout.strip() if service and service.returncode == 0 else 'inactive or unavailable'}")
 journal = run(["journalctl", "--user", "-u", "calendar-reminder-overlay.service", "-p", "warning", "--no-pager", "-n", "20"])
-if journal and journal.stdout.strip():
+if args.verbose and journal and journal.stdout.strip():
     print("Recent service warnings/errors:")
     print(journal.stdout.rstrip())
 print("Registry discovery is explicit only: run `reminderctl calendars` to list local EDS calendars. Diagnostics never initializes account setup or starts a service.")

@@ -2,7 +2,7 @@
 
 ## Execute
 
-**Task:** Execute epic #1 using one Luna worker at a time. Related issues are grouped into draft PRs; the coordinator reviews and dissents on every draft, corrects alignment/complexity/useless tests, then merges accepted work only into `codex/attention-overlay-integration` for user testing.
+**Task:** Execute epic #1 using Luna workers. Related issues are grouped into draft PRs; the coordinator reviews and dissents on every draft, corrects alignment/complexity/useless tests, then merges accepted work only into `codex/attention-overlay-integration` for user testing.
 
 **Aim:** Users notice selected commitments and deliberately open/join, snooze or dismiss them through the accepted large overlay and optional sound. Ordinary notification ownership and appearance remain independent.
 
@@ -37,6 +37,18 @@
 | Tests mirror code and hide wrong behavior | Review each test for an actual failure mode; remove scaffolding-only tests | Coordinator review per draft |
 
 **Stop/pivot:** A proposed source needs new account/sync infrastructure, the accepted UI is replaced without evidence, any implementation takes over normal notifications, or a display failure is hidden by weakening acceptance. Adjust at the responsible draft instead of silently changing scope.
+
+### Execution update — independent packaging and design review
+
+Group 2 was split into native delivery/audio (#13) and reconciliation/display (next draft) to keep review coherent. When the remaining group-2 estimate reached 60–90 minutes, a second Luna worker started independent packaging/docs in a separate worktree. Source/config/Makefile/core tests remain exclusively owned by the first worker; install/service/docs/install tests by the second. Reviews and merges stay sequential. This replaces the initial one-worker scheduling choice with bounded, non-overlapping work rather than parallelizing individual issues.
+
+The user added one Impeccable critique pass, one polish pass, execution of every suggestion, followed by one onboarding pass and execution of every suggestion. Preserve the accepted huge overlay and visible buttons. Critique ran against frozen integration `46cc2e6`, using native source review plus a COSMIC capture and user observations; a web-markup detector is inapplicable. The initial result is 21/40, with C1–C5: full-output centered presentation, safe keyboard arrival, inline accessible failure/retry, action grouping/clear labels, and constrained-output/long-content/disabled-state handling. These are assigned to the UI worker. The snapshot is under `.impeccable/critique/` in the primary checkout.
+
+The capture demonstrated a real failure despite available Wayland layer-shell: the surface occupied only an upper-left portion of the output, with gray outer margins. The user also reported typing resolved the mock. Do not treat capability detection as passing placement or keyboard evidence. Temporary mock processes were stopped; further presentation is reserved for one bounded confirmation after fixes. No live calendar event or actual audio was used.
+
+**Polish — one pass:** Source assessment found P1–P6: unattached centered container; unretained CSS provider/unused backend selection; asynchronous callback lifetime and mirrored busy/error states; duplicate Open handoffs before the pending guard; deliberate keyboard arrival/focus; and complete semantic/disabled/time/hotplug states. All were assigned and implementation was reported complete before onboarding. A native GTK CSS parser probe against the actual policy application passed after replacing unsupported web `max-width` properties with GTK layout APIs. The critique storage helper returned exit 2 because changed source automatically closed the old snapshot backlog; the finite C1–C5 list remains tracked here rather than being silently discarded. No second critique or polish pass is planned.
+
+**Onboarding — one pass:** First value is the real overlay/buttons before calendar enrollment, without a mandatory wizard. Execute all O1–O4: explicit repeatable fresh-ID preview, complete copy-ready calendar keys/TOML guidance, a short preview → selection → validation → activation → diagnostics setup path, and actionable disabled/empty/stale/display failure states. Packaging owns the preview/docs/diagnostics work; the source worker owns calendar-list output. No preview or audio runs automatically during installation. Implementation and final checks remain pending.
 
 ## Dissent
 
@@ -87,3 +99,27 @@ Drafts are reviewed sequentially before integration.
 **Verification:** `make check` passes after the tuple fix, including native-owned persisted snooze exclusion, unavailable-native-action failure, exact timestamp snooze, playback repetition/suppression and shutdown with stub processes. A sanitized isolated startup with minimal config reports no demonstrated AddressSanitizer/UndefinedBehaviorSanitizer error. No live calendar, actual sound or compositor display was exercised. Actual EDS native trigger/action delivery and each target compositor remain human/session verification boundaries.
 
 **Decision:** Continue with group 2b; no epic issue is closed from this intermediate draft. Current selection reload does not yet reconcile existing native records or enable/disable the watcher; that is required follow-up before the test branch is handed off.
+
+### Draft #15 — live display, policy, audio and design execution
+
+**Review:** ADJUST, then merge as display/policy integration. The GTK-owned legacy scheduler is removed. Runtime ownership/source/calendar metadata, per-calendar audio/snooze settings, output selection/copies/hotplug, policy reload withdrawal, visible retry states and the complete critique/polish implementation are included. EDS snapshots/fallback/recurrence reconciliation and asynchronous native restoration remain explicitly required in the next source draft.
+
+**Coordinator corrections:** Playback still started on headless admission and `SetForeground` undid mute whenever `audio_suppressed` was true. Require an explicit foreground ID, preserve suppression for repeated foreground publication, clear foreground on resolution, and avoid muting it when a different hidden alert is canceled. Stop old playback settings on policy reload without rearming the current alert. Preserve native owner during group-2a database migration, and reject producer replacement of provider-owned rows. Guard failure to generate the default tone and release diagnostic JSON nodes. Tests now exercise actual foreground protocol rather than relying on invisible admission to make sound.
+
+**Dissent:** A shared renderer and core reduce duplicate scheduling, but more configuration is not proof it is applied safely. Contrary evidence: unformatted JSON compared with compact JSON recreated windows every poll; center content was unattached; a second timeout duplicated GIO's action deadline; and the muted foreground restarted sound. The worker corrected the first three after direct coordinator reproduction/review; coordinator fixed the last and admission/ownership gaps. Functional pre-mortem: visible controls point at dead windows or an invisible alert makes noise. Adoption pre-mortem: typing resolves an arriving reminder or repeated demo never appears. Opportunity-cost pre-mortem: a growing UI duplicates source logic; removing the old scanner and reusing GIO deadlines narrows that risk. Snapshot freshness remains unimplemented rather than fabricated as a successful scan.
+
+**Verification:** `make check` passes core lifecycle/admission/migration, real CLI URI handoff with an isolated handler, unchanged-policy formatting, and per-calendar silence/volume/default-WAV checks using stub playback. The core lifecycle suite also passes with AddressSanitizer and UndefinedBehaviorSanitizer (leak detection disabled; no leak-safety claim). A native CSS policy probe passes without a window. Final visual placement/typing confirmation remains pending; only the earlier failed placement/typing observation is established. No live calendar or actual sound was used.
+
+**Decision:** Continue into the source reconciliation draft. Keep epic/source/desktop acceptance open until its checks and the user test boundary are accounted for.
+
+## 2026-10-15 — README/install onboarding and whole-path polish
+
+One onboarding pass and one polish pass, preserving the locally accepted huge overlay and its visible buttons. Read mode for README and Operate mode for installer/CLI. Existing session context and accepted live overlay supplied incumbent evidence; no new visual mock loop.
+
+Implemented a preview-first README, concrete selection TOML, account prerequisites, activation success criteria, script example, reload/stop/update/uninstall paths, and a troubleshooting table. Installer now checks tools, development libraries, and Python bindings before changing installed files, and reports the next first-run action. Diagnostics summarizes alerts by default; --verbose explicitly exposes event contents/journal warnings. Source status includes registry activity and readable local sync times. Compatibility now records the actual installed COSMIC acceptance without extending it to other desktops.
+
+Polish found explicit CLI presentation intent was coupled to audio's foreground ID and lost on snooze/idle. Keep a session-local set of actually presented alert IDs until terminal state, so supervised renderer recovery can present them when snooze expires. It does not arm headless submissions or start an overlay without an explicit renderer path.
+
+Verification: installer smoke passed (temporary homes, fake systemd, no production changes); shellcheck and shell/Python syntax checks passed. A private-bus check with a stub renderer verified a shown CLI alert snoozes, survives renderer exit and foreground clear, and starts a replacement when due. Initial check fixture used a source excluded by its own config; corrected the fixture selection, then passed. No live calendar event was created, no extra visual pass was run. Existing overlay appearance was retained.
+
+Applet investigation: documented a proposed native COSMIC popup, pause semantics, agenda/paused/offline states, and core API gaps in docs/applet-control.md. Official libcosmic panel/template and existing calendar applet reviewed. No applet or global pause capability is claimed implemented; avoid a second provider sync stack.

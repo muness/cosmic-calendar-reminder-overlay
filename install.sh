@@ -22,7 +22,30 @@ unit_dir="${config_home}/systemd/user"
 unit_file="${unit_dir}/calendar-reminder-overlay.service"
 legacy_unit="evolution-dunst-reminders.service"
 
-command -v make >/dev/null || { echo 'make is required' >&2; exit 1; }
+# Fail before touching installed files, units, or an existing service.
+missing=()
+for tool in make pkg-config busctl dbus-run-session; do
+  command -v "$tool" >/dev/null || missing+=("$tool")
+done
+command -v "${CC:-cc}" >/dev/null || missing+=("${CC:-cc} (C compiler)")
+if [[ "$activate" == true ]]; then
+  command -v systemctl >/dev/null || missing+=("systemctl (user service activation)")
+fi
+if ((${#missing[@]})); then
+  printf 'Missing required command: %s\n' "${missing[@]}" >&2
+  echo 'Install the missing tools, then rerun install.sh. See README.md for dependencies.' >&2
+  exit 1
+fi
+if ! pkg-config --exists gtk4 gtk4-layer-shell-0 libecal-2.0 gio-2.0 sqlite3 json-glib-1.0; then
+  echo 'Missing development libraries. pkg-config reports:' >&2
+  pkg-config --print-errors --exists gtk4 gtk4-layer-shell-0 libecal-2.0 gio-2.0 sqlite3 json-glib-1.0 >&2 || true
+  echo 'Install the named development packages, then rerun install.sh.' >&2
+  exit 1
+fi
+if ! /usr/bin/python3 -c 'import tomllib; from gi.repository import Gio, GLib' >/dev/null 2>&1; then
+  echo '/usr/bin/python3 needs Python 3.11+ with tomllib and PyGObject (Gio/GLib). Install those dependencies, then rerun install.sh.' >&2
+  exit 1
+fi
 make -C "$root" all
 for artifact in build/reminder-core build/calendar-reminder-overlay src/reminderctl.py scripts/reminder-demo scripts/reminder-diagnostics; do
   [[ -f "$root/$artifact" ]] || { echo "Build did not produce $artifact" >&2; exit 1; }
@@ -114,5 +137,10 @@ fi
 printf 'Installed files under %s\n' "$install_root"
 printf 'Configuration: %s\n' "$config_file"
 if [[ "$activate" != true ]]; then
-  echo 'Staged only. Review configuration, then run install.sh --activate to enable the user service.'
+  echo 'Files staged; no service was started or restarted.'
+  printf 'Try the overlay: %s/reminder-demo\n' "$bin_dir"
+  printf 'Choose calendars: %s/reminderctl calendars\n' "$bin_dir"
+  echo 'Then edit the configuration above, validate with reminderctl config-check, and run ./install.sh --activate.'
+else
+  printf 'Check calendar sync: %s/reminder-diagnostics\n' "$bin_dir"
 fi

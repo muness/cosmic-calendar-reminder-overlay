@@ -1,80 +1,151 @@
 # Calendar Reminder Overlay
 
-A local GTK reminder surface with a separate alert core and `reminderctl` CLI. The core owns local alert state and its session D-Bus API; the renderer presents alerts submitted to that core. Calendar support uses Evolution Data Server (EDS) when explicitly enabled and selected in the TOML configuration.
+Huge calendar reminders for Linux, with buttons you can actually click: **Open meeting**, **Dismiss**, and **Snooze**. The overlay covers your screen and stays until you act. Ordinary desktop notifications keep using your existing notification service.
 
-This repository is an active implementation. A previous COSMIC setup was accepted by its user, but the current integration branch has not been verified as a packaged install or across desktop environments. See [compatibility](docs/compatibility.md) for the evidence boundary.
+Early alpha. Installed and used on COSMIC Wayland; other desktops are [unverified](docs/compatibility.md). Calendar accounts come from Evolution Data Server (EDS). You can also send reminders from scripts without connecting a calendar.
 
-## Quick start
+## Try the overlay first
 
-After building and staging once with `make && ./install.sh`, try the preview in your graphical session before choosing calendars. It shows a real overlay alert titled **“Preview reminder — no calendar event”** using a temporary config, state database, and private D-Bus session. It creates no calendar event, changes no user config or state, and always runs silently. Success means the overlay appears with its Dismiss and Snooze buttons; after Dismiss, the terminal reports that the preview finished. Run `reminder-demo` again any time for a fresh preview, or skip it. A supplied `--url` is offered only through Open in the alert.
+You need a Linux graphical session, a C compiler, `make`, `pkg-config`, and development libraries for GTK4, GTK4 Layer Shell, Evolution Data Server (`libecal-2.0`), GIO, SQLite, and JSON-GLib. Runtime needs Python 3.11+ at `/usr/bin/python3` with PyGObject (Gio and GLib), plus `busctl` and `dbus-run-session`. Automatic startup uses a systemd user session. Optional sound uses PipeWire's `pw-play`.
 
-```sh
-reminder-demo
-reminderctl calendars  # optional: explicitly list local EDS calendars and copy selection keys
-${EDITOR:-vi} "${XDG_CONFIG_HOME:-$HOME/.config}/calendar-reminder-overlay/config.toml"
-reminderctl config-check
-./install.sh --activate
-reminder-diagnostics
-```
-
-`reminderctl calendars` explicitly reads calendars already visible to EDS; it does not create accounts or edit the config. Copy the exact selection key into `[selection].calendars`, or generate a minimal config snippet for one calendar with `reminderctl calendars --snippet <calendar-id-or-full-key>`. Leave `[calendar].eds_enabled = false` for a preview-only setup. The initial config selects no calendars, and installing or previewing does not take over Dunst, SwayNC, or another ordinary notification service. The preview uses the actual GTK alert buttons; keep its terminal open after Snooze so the isolated core can show the alert again when that snooze expires. Its private D-Bus may produce accessibility or portal warnings; those are not hidden, and desktop/session handoff still needs real-session validation.
-
-## Build and install
-
-Build dependencies include a C compiler, `make`, GTK4, GTK4 Layer Shell, Evolution Data Server, GIO, SQLite, and JSON-GLib. Runtime needs `/usr/bin/python3` with PyGObject's Gio and GLib bindings. Audio playback is optional and requires PipeWire's `pw-play` when enabled in config. `make` builds the core and renderer; `make check` runs the local core lifecycle checks.
+From this checkout:
 
 ```sh
-make
-make check
 ./install.sh
+~/.local/bin/reminder-demo
 ```
 
-`install.sh` builds and stages the files under `$XDG_DATA_HOME/calendar-reminder-overlay` (default: `~/.local/share`), creates `reminderctl`, `reminder-demo`, and `reminder-diagnostics` commands in `~/.local/bin`, and installs the user service file. It does not enable or start the service. The first configuration is created at `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml` (default: `~/.config`) with an empty calendar selection. Existing configuration is validated before installed files are replaced.
+Installation builds the app and stages it in your home directory. It creates a configuration with no calendars selected; it does not start the background service. The installer reports missing dependencies before replacing installed files.
 
-Review the configuration, then explicitly activate the service:
+The preview shows a **Preview reminder — no calendar event** overlay with real buttons. Click **Dismiss** to finish, or **Snooze** to see it return; keep the terminal open while snoozed. Press Ctrl+C in that terminal to end the preview. It uses temporary state and a private D-Bus session, stays silent, and creates no calendar event. Replay it whenever you want. To try the Open meeting button:
 
 ```sh
-${EDITOR:-vi} "${XDG_CONFIG_HOME:-$HOME/.config}/calendar-reminder-overlay/config.toml"
+~/.local/bin/reminder-demo --url https://example.org
+```
+
+The supplied link opens only when you click **Open meeting**. Keyboard use: click the background, then Tab to a button and press Enter. Typing as an alert arrives cannot activate its buttons before Tab navigation.
+
+Add `~/.local/bin` to your PATH if these commands are not found without the full path. You can skip the preview and continue below.
+
+## Connect your calendars
+
+First, connect your account in your desktop's Online Accounts or Evolution, and confirm that events appear in Evolution's Calendar view. This app reads calendars already available through EDS; it does not implement Google or Microsoft sign-in. Provider support depends on your EDS account setup. KDE's Akonadi accounts are [not connected yet](docs/akonadi-discovery.md).
+
+### Choose calendars
+
+```sh
+~/.local/bin/reminderctl calendars
+```
+
+Copy a selection key from that list. To print a minimal configuration for one calendar, replace the example key below with your actual key:
+
+```sh
+~/.local/bin/reminderctl calendars --snippet 'eds-local/YOUR-CALENDAR-ID'
+```
+
+Edit `~/.config/calendar-reminder-overlay/config.toml` (or `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml`). A minimal setup is:
+
+```toml
+version = 1
+
+[selection]
+mode = "include"
+calendars = ["eds-local/YOUR-CALENDAR-ID"] # replace with a key from the list
+
+[calendar]
+eds_enabled = true
+```
+
+List multiple keys to select multiple calendars. An empty include list selects none. Use `mode = "all"` only if you want every enabled EDS calendar, including holiday calendars. Installing again preserves your configuration.
+
+### Start reminders
+
+From the checkout, in your graphical session:
+
+```sh
+~/.local/bin/reminderctl config-check
 ./install.sh --activate
+~/.local/bin/reminder-diagnostics
 ```
 
-On activation, the installer enables `calendar-reminder-overlay.service` for `graphical-session.target` and starts or restarts it when that target is active. If activated from a text session, it leaves the unit enabled for the next graphical session without starting it. The unit stops when the graphical session ends. If the old `evolution-dunst-reminders.service` is enabled or active, it disables/stops that legacy unit after validating the new files and config. It does not change Dunst, SwayNC, or another notification daemon. The old executable is left in place for manual review.
+Look for **User service: active** and per-calendar fetch status in diagnostics. Calendar synchronization can take time; an active service alone does not prove the provider has synced. Existing calendar alarms are used when available; fallback reminders use a five-minute lead by default. [Configuration options](config.example.toml) cover snooze choices, selected outputs, theme, fallback behavior, per-calendar overrides, and optional audio. Sound is off by default.
 
-Configuration uses strict versioned TOML; see [config.example.toml](config.example.toml). Set `[calendar].eds_enabled = true` to connect to EDS, and select calendars using `source-id/calendar-id` strings in `[selection]`. Include mode with an empty list selects nothing. `reminderctl config-check` validates configuration without starting the service. `reminderctl calendars` lists configured EDS calendars read-only.
+Activation enables startup with your graphical session and starts or restarts the service. From a text session it enables startup for the next graphical login. It replaces the specifically named legacy `evolution-dunst-reminders.service` if present. It does not replace Dunst, SwayNC, or your ordinary notification daemon.
 
-## CLI and synthetic demonstration
+## Send a reminder from a script
 
-The CLI can submit and manage local alerts. For example:
+With the service active:
 
 ```sh
-reminderctl notify timer:tea "Tea is ready" --body "Take the kettle off"
-reminderctl status timer:tea
-reminderctl wait timer:tea --after-revision 1 --timeout 300
-reminderctl cancel timer:tea
+~/.local/bin/reminderctl notify timer:tea 'Tea is ready' \
+  --body 'Take the kettle off' --show
 ```
 
-For an isolated GTK preview with fresh IDs and real alert actions, use:
+`--show` requests the overlay. Omit it to submit state without explicitly opening a renderer. A generic reminder has no event start time, so **Until event starts** is unavailable. Supply `--url https://example.org` to offer an Open meeting button.
+
+Reuse an ID to address the same reminder; choose a fresh ID for a separate one. Inspect or cancel it with:
 
 ```sh
-reminder-demo
-# Optional link; it opens only after choosing Open in the alert.
-reminder-demo --url 'https://example.org'
+~/.local/bin/reminderctl status timer:tea
+~/.local/bin/reminderctl cancel timer:tea
 ```
 
-`reminder-demo` does not enroll a calendar or run automatically during installation. `reminder-diagnostics` reports installed paths, config validation, EDS selection state, renderer capability evidence, and the already-running core's alert and per-source freshness/errors when exposed. It never initializes account discovery or auto-starts the service; run `reminderctl calendars` explicitly to list existing EDS calendars. A stale/error source points to the account/provider and service journal. A headless renderer-capability failure needs a rerun in the target graphical session and does not by itself prove display incompatibility.
+`reminderctl --help` lists update, action, and wait commands for integrations.
 
-## Uninstall
+## Change settings or stop reminders
+
+After editing TOML, validate it and explicitly reload the running service:
+
+```sh
+~/.local/bin/reminderctl config-check
+~/.local/bin/reminderctl reload
+```
+
+To stop the service for now, then start it again:
+
+```sh
+systemctl --user stop calendar-reminder-overlay.service
+systemctl --user start calendar-reminder-overlay.service
+```
+
+To turn off automatic startup as well:
+
+```sh
+systemctl --user disable --now calendar-reminder-overlay.service
+```
+
+These are service controls, not a timed pause: the service does not monitor calendars while stopped. CLI commands that need the core can start it again. A [panel control with pause/resume and upcoming events](docs/applet-control.md) is proposed; it is not included yet.
+
+## Troubleshooting
+
+| What you see | Next step |
+|---|---|
+| Build or dependency error | Install the named development libraries and Python bindings, then rerun `./install.sh`. |
+| Preview cannot open a display | Run it from a terminal inside your graphical desktop. |
+| No calendars listed | Check that events appear in Evolution; reconnect or sync the account there first. |
+| No calendar reminders | Check `eds_enabled`, selection keys, and per-calendar status in `reminder-diagnostics`. |
+| Calendar status is stale or error | Check the account connection and the service journal below. The last successful snapshot is retained. |
+| Command not found | Use `~/.local/bin/<command>` or add that directory to PATH. |
+
+```sh
+~/.local/bin/reminder-diagnostics
+journalctl --user -u calendar-reminder-overlay.service -n 50 --no-pager
+```
+
+Diagnostics does not start the service or set up accounts. Its normal output summarizes alerts; `reminder-diagnostics --verbose` includes event contents and service warnings. Review verbose output and journals for private meeting details before sharing them.
+
+## Update or uninstall
+
+From an updated checkout, rerun `./install.sh --activate`. This rebuilds, preserves configuration and state, and restarts the service with the new version. `./install.sh` alone stages files without restarting an already-running service.
 
 ```sh
 ./uninstall.sh
 ```
 
-This removes the owned service unit, launchers, and installed binaries while preserving configuration and alert state. Use `./uninstall.sh --purge` only when you also want to remove this application's config and state. Legacy executables and notification services are not removed.
+Uninstall preserves configuration and alert state. `./uninstall.sh --purge` also removes those files. It leaves unrelated notifications and legacy executables alone.
 
-## Desktop compatibility
+## Development and desktop support
 
-The GTK Layer Shell renderer targets compositors that implement its overlay layer. The COSMIC legacy user acceptance does not establish that this branch works there. Hyprland and KDE Plasma Wayland have not been tested in this work. An optional GNOME Shell helper prototype is in [gnome-extension](gnome-extension/README.md); it is not installed or enabled by the installer and has not been tested in a GNOME session. Details and limits are in [docs/compatibility.md](docs/compatibility.md).
+`make` builds the core and GTK renderer; `make check` runs the automated checks. The core owns persistent alert state and a session D-Bus API; the CLI and renderer consume it.
 
-## Akonadi discovery
-
-A source-based investigation found that KDE's reminder daemon owns alarm dismissal, snooze, persistence, and scheduling in-process; its inspected D-Bus interface does not expose a generic alarm feed or actions. The report records the exact adapter boundary and why native Akonadi support is not claimed: [docs/akonadi-discovery.md](docs/akonadi-discovery.md).
+COSMIC has local user acceptance for the installed alpha. Multi-monitor behavior, other compositors, and all account/provider combinations are not established by that result. Hyprland/Omarchy and KDE Plasma Wayland are unverified. The optional GNOME Shell helper is experimental and not installed automatically. See [compatibility](docs/compatibility.md), [GNOME helper](gnome-extension/README.md), and [Akonadi discovery](docs/akonadi-discovery.md).

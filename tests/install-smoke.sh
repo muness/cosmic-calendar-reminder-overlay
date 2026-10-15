@@ -158,7 +158,7 @@ not_contains "$unit" 'WantedBy=default.target'
 sed -i 's#calendars = \[\]#calendars = ["work/selected"]#' "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml"
 "$root/install.sh" >"$tmp/staged-again.out"
 grep -Fq 'calendars = ["work/selected"]' "$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml"
-contains "$tmp/fresh.out" 'Staged only'
+contains "$tmp/fresh.out" 'Files staged; no service was started or restarted.'
 
 # Fresh activation starts the new service and does not probe/disable legacy unit.
 new_home fresh-activate
