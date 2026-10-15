@@ -57,3 +57,21 @@
 ## Draft review log
 
 Pending first Luna draft.
+
+### Draft #12 — core/configuration/CLI/state
+
+**Review:** ADJUST, then continue as a bounded foundation. Preserve the C/GTK layout; native EDS integration, configuration application to that path, live update/cancel presentation and full calendar discovery remain explicit dependencies of group 2. No epic issue is declared complete from this foundation alone.
+
+**Findings corrected by coordinator:**
+- Startup `load_policy` freed aliased path/helper arguments before copying; AddressSanitizer reproduced a heap-use-after-free. Copy replacements before releasing owned strings.
+- Read-only CLI calls reloaded a caller's config and could change the daemon's selection. Added explicit `reload`; ordinary operations preserve active daemon policy.
+- `wait` confused a content revision with a fresh action. Persist `action_revision` separately, including a narrow preview-schema migration.
+- Rejected local UI actions still closed their window. Gate teardown on accepted results; exit the single-alert frontend after successful resolution instead of leaving invisible per-alert processes.
+- Reject invalid TOML table shapes and booleans passed as numeric settings. Reject a second core owner rather than silently queuing another daemon.
+- Replace custom JSON escaping with JSON-GLib already used by the core. Ignore build/Python cache output. Remove selection-function-only assertions now covered by actual admission tests.
+
+**Dissent:** The strongest argument for the draft is that its small persisted core makes synthetic behavior independent of calendars. Contrary evidence was the green smoke suite alongside reproducible memory/policy/result bugs. Functional pre-mortem: an action appears completed but its window/state disagrees. Adoption pre-mortem: another client silently changes selected calendars. Opportunity-cost pre-mortem: duplicate lifecycle code grows around EDS rather than reusing native state. The corrected boundary is plausible, but only a foundation; group 2 must integrate provider ownership and live rendering rather than layering a second fake scheduler onto native alarms.
+
+**Decision:** ADJUST to the fixes above, then merge into the integration branch. No public interface stability is promised yet. Confidence is medium; cross-desktop/rendering evidence is still pending.
+
+**Verification:** `make check` passes lifecycle and new policy/action-revision regressions; isolated review probes changed from reproducing both policy/result bugs to passing. A sanitized core startup no longer reports the demonstrated use-after-free. Live UI button/render behavior is not yet claimed.

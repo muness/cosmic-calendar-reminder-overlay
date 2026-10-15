@@ -20,6 +20,8 @@ CONFIG = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", pathlib.Path.home() / ".
 
 
 def _keys(section, allowed, name):
+    if not isinstance(section, dict):
+        raise ValueError(f"[{name}] must be a TOML table")
     unknown = sorted(set(section) - set(allowed))
     if unknown:
         raise ValueError(f"unknown key(s) in [{name}]: {', '.join(unknown)}")
@@ -33,39 +35,39 @@ def load_config(path):
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ValueError(f"cannot load config {path}: {exc}") from exc
     _keys(config, {"version", "selection", "reminders", "snooze", "display", "appearance", "audio"}, "root")
-    if config.get("version") != 1:
+    if type(config.get("version")) is not int or config["version"] != 1:
         raise ValueError("config requires version = 1")
     selection = config.get("selection", {})
     _keys(selection, {"mode", "calendars"}, "selection")
     mode, calendars = selection.get("mode", "include"), selection.get("calendars", [])
-    if mode not in {"include", "exclude", "all"} or not isinstance(calendars, list) or any(not isinstance(v, str) or not v for v in calendars):
+    if mode not in ("include", "exclude", "all") or not isinstance(calendars, list) or any(not isinstance(v, str) or not v for v in calendars):
         raise ValueError("[selection] mode must be include/exclude/all and calendars must be non-empty string IDs")
     if mode == "all" and calendars:
         raise ValueError("[selection] calendars must be empty when mode = 'all'")
     reminders = config.get("reminders", {})
     _keys(reminders, {"fallback_lead_minutes"}, "reminders")
     lead = reminders.get("fallback_lead_minutes", 5)
-    if not isinstance(lead, int) or not 1 <= lead <= 120:
+    if type(lead) is not int or not 1 <= lead <= 120:
         raise ValueError("[reminders].fallback_lead_minutes must be an integer from 1 to 120")
     snooze = config.get("snooze", {})
     _keys(snooze, {"minutes"}, "snooze")
     minutes = snooze.get("minutes", [1, 5])
-    if not isinstance(minutes, list) or not minutes or any(not isinstance(v, int) or not 1 <= v <= 10080 for v in minutes):
+    if not isinstance(minutes, list) or not minutes or any(type(v) is not int or not 1 <= v <= 10080 for v in minutes):
         raise ValueError("[snooze].minutes must be a non-empty list of integers from 1 to 10080")
     display = config.get("display", {})
     _keys(display, {"backend", "outputs"}, "display")
-    if display.get("backend", "native") not in {"native", "fullscreen"} or display.get("outputs", "all") not in {"all", "primary"}:
+    if display.get("backend", "native") not in ("native", "fullscreen") or display.get("outputs", "all") not in ("all", "primary"):
         raise ValueError("[display] backend must be native/fullscreen and outputs must be all/primary")
     appearance = config.get("appearance", {})
     _keys(appearance, {"theme"}, "appearance")
-    if appearance.get("theme", "default") not in {"default", "dark", "light"}:
+    if appearance.get("theme", "default") not in ("default", "dark", "light"):
         raise ValueError("[appearance].theme must be default, dark, or light")
     audio = config.get("audio", {})
     _keys(audio, {"enabled", "file", "repeat_seconds"}, "audio")
     if not isinstance(audio.get("enabled", False), bool) or not isinstance(audio.get("file", ""), str):
         raise ValueError("[audio].enabled must be boolean and [audio].file must be a path")
     repeat = audio.get("repeat_seconds", 0)
-    if not isinstance(repeat, int) or not 0 <= repeat <= 3600:
+    if type(repeat) is not int or not 0 <= repeat <= 3600:
         raise ValueError("[audio].repeat_seconds must be an integer from 0 to 3600")
     return {**config, "selection": {"mode": mode, "calendars": calendars}}
 
@@ -117,8 +119,6 @@ def ensure_service(core, config):
                 pass
     if not running:
         raise SystemExit("could not start local alert service")
-    if not call("ReloadPolicy", "(ss)", (config, helper))[0]:
-        raise SystemExit("invalid TOML config; the core preserved its last valid selection")
 
 
 def main():
@@ -143,6 +143,7 @@ def main():
     p = sub.add_parser("act"); p.add_argument("id"); p.add_argument("revision", type=int); p.add_argument("action", choices=["open", "dismiss", "snooze"]); p.add_argument("--minutes", type=int, default=5)
     p = sub.add_parser("wait"); p.add_argument("id"); p.add_argument("--after-revision", type=int, default=0); p.add_argument("--timeout", type=int, default=0)
     p = sub.add_parser("check-selection"); p.add_argument("source_id"); p.add_argument("calendar_id")
+    p = sub.add_parser("reload", help="explicitly reload the daemon policy from --config")
     p = sub.add_parser("config-check")
     sub.add_parser("policy-json", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -157,6 +158,10 @@ def main():
     if args.command == "policy-json":
         print(json.dumps(config["selection"])); return
     ensure_service(args.core, args.config)
+    if args.command == "reload":
+        ok = call("ReloadPolicy", "(ss)", (args.config, str(pathlib.Path(__file__).resolve())))[0]
+        print(json.dumps({"reloaded": ok}))
+        raise SystemExit(0 if ok else 1)
     if args.command in ("notify", "update"):
         data = {"id": args.id, "title": args.title, "body": args.body, "destination": args.url, "expires_at": args.expires_at, "source_id": args.source_id, "calendar_id": args.calendar_id}
         if args.json:
@@ -206,7 +211,7 @@ def main():
         while True:
             raw = call("Status", "(s)", (args.id,))[0]
             item = json.loads(raw)
-            if item and item.get("action") and item["revision"] > args.after_revision:
+            if item and item.get("action") and item.get("action_revision", 0) > args.after_revision:
                 print(json.dumps(item)); return
             if args.timeout and time.monotonic() - started >= args.timeout:
                 print(json.dumps({"timeout": True, "id": args.id})); raise SystemExit(3)

@@ -61,8 +61,9 @@ load_policy (const gchar *path, const gchar *helper, GError **error)
 		g_hash_table_add (next_ids, g_strdup (json_array_get_string_element (ids, i)));
 	g_free (policy_mode); policy_mode = next_mode; next_mode = NULL;
 	g_clear_pointer (&selected_calendars, g_hash_table_unref); selected_calendars = next_ids;
-	g_free (config_path); config_path = g_strdup (path);
-	g_free (helper_path); helper_path = g_strdup (helper);
+	gchar *next_path = g_strdup (path), *next_helper = g_strdup (helper);
+	g_free (config_path); config_path = next_path;
+	g_free (helper_path); helper_path = next_helper;
 	ok = TRUE;
 done:
 	if (parser) g_object_unref (parser);
@@ -95,34 +96,20 @@ exec_sql (const gchar *sql, GError **error)
 }
 
 static gchar *
-json_escape (const gchar *s)
-{
-	GString *out = g_string_new ("\"");
-	const guchar *p = (const guchar *) (s ? s : "");
-	for (; *p; p++) {
-		if (*p == '"' || *p == '\\') { g_string_append_c (out, '\\'); g_string_append_c (out, *p); }
-		else if (*p < 0x20) g_string_append_printf (out, "\\u%04x", *p);
-		else g_string_append_c (out, *p);
-	}
-	g_string_append_c (out, '"');
-	return g_string_free (out, FALSE);
-}
-
-static gchar *
 row_json (sqlite3_stmt *st)
 {
-  gchar *id = json_escape ((const gchar *) sqlite3_column_text (st, 0));
-  gchar *title = json_escape ((const gchar *) sqlite3_column_text (st, 1));
-  gchar *body = json_escape ((const gchar *) sqlite3_column_text (st, 2));
-  gchar *dest = json_escape ((const gchar *) sqlite3_column_text (st, 3));
-  gchar *state = json_escape ((const gchar *) sqlite3_column_text (st, 4));
-  gchar *action = json_escape ((const gchar *) sqlite3_column_text (st, 5));
-  gchar *payload = json_escape ((const gchar *) sqlite3_column_text (st, 6));
-  gchar *json = g_strdup_printf ("{\"id\":%s,\"title\":%s,\"body\":%s,\"destination\":%s,\"state\":%s,\"action\":%s,\"payload\":%s,\"revision\":%lld,\"expires_at\":%lld,\"snooze_until\":%lld}",
-    id, title, body, dest, state, action, payload,
-    (long long) sqlite3_column_int64 (st, 7), (long long) sqlite3_column_int64 (st, 8), (long long) sqlite3_column_int64 (st, 9));
-  g_free (id); g_free (title); g_free (body); g_free (dest); g_free (state); g_free (action); g_free (payload);
-  return json;
+  JsonObject *object = json_object_new ();
+  JsonNode *node = json_node_new (JSON_NODE_OBJECT);
+  const gchar *strings[] = { "id", "title", "body", "destination", "state", "action", "payload" };
+  const gchar *numbers[] = { "revision", "expires_at", "snooze_until", "action_revision" };
+  for (guint i = 0; i < G_N_ELEMENTS (strings); i++)
+    json_object_set_string_member (object, strings[i], (const gchar *) sqlite3_column_text (st, i));
+  for (guint i = 0; i < G_N_ELEMENTS (numbers); i++)
+    json_object_set_int_member (object, numbers[i], sqlite3_column_int64 (st, i + 7));
+  json_node_take_object (node, object);
+  gchar *result = json_to_string (node, FALSE);
+  json_node_free (node);
+  return result;
 }
 
 static gboolean
@@ -130,7 +117,7 @@ read_one (const gchar *id, gchar **json, gchar **state, gint64 *revision, gint64
 {
   sqlite3_stmt *st = NULL;
   gboolean found = FALSE;
-  const gchar *sql = "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until FROM alerts WHERE id=?";
+  const gchar *sql = "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until,action_revision FROM alerts WHERE id=?";
   if (sqlite3_prepare_v2 (db, sql, -1, &st, NULL) == SQLITE_OK) {
     sqlite3_bind_text (st, 1, id, -1, SQLITE_TRANSIENT);
     if (sqlite3_step (st) == SQLITE_ROW) {
@@ -195,15 +182,13 @@ static gboolean
 save_alert (const gchar *id, const gchar *title, const gchar *body, const gchar *destination, guint64 expires, gboolean update, guint64 *revision, GError **error)
 {
   gchar *old_state = NULL;
-  gint64 old_revision = 0;
-  const gchar *state = "active";
   sqlite3_stmt *st = NULL;
 	const gchar *sql = "INSERT INTO alerts(id,title,body,destination,state,action,payload,revision,expires_at,snooze_until) VALUES(?,?,?,?,?,'','',1,?,0) ON CONFLICT(id) DO UPDATE SET title=excluded.title,body=excluded.body,destination=excluded.destination,revision=alerts.revision+1,expires_at=excluded.expires_at,state=CASE WHEN alerts.state IN ('dismissed','cancelled','expired','snoozed') THEN alerts.state ELSE 'active' END,snooze_until=CASE WHEN alerts.state='snoozed' THEN alerts.snooze_until ELSE 0 END";
   refresh_deadlines ();
-  if (!valid_id (id) || !title || !*title || strlen (id) > 180 || strlen (title) > 512 || strlen (body) > 8192 || strlen (destination) > 2048) {
+  if (expires > G_MAXINT64 || !valid_id (id) || !title || !*title || strlen (id) > 180 || strlen (title) > 512 || strlen (body) > 8192 || strlen (destination) > 2048) {
     g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT, "invalid alert id or field size (id must be namespaced, title non-empty)"); return FALSE;
   }
-  if (read_one (id, NULL, &old_state, &old_revision, NULL, NULL)) state = old_state;
+  read_one (id, NULL, &old_state, NULL, NULL, NULL);
 	if (update && !old_state) {
 		g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "cannot update unknown alert ID %s", id);
 		g_free (old_state);
@@ -223,7 +208,7 @@ save_alert (const gchar *id, const gchar *title, const gchar *body, const gchar 
   return TRUE;
 failed:
   g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "%s", sqlite3_errmsg (db));
-  sqlite3_finalize (st); g_free (old_state); (void) old_revision; (void) state;
+  sqlite3_finalize (st); g_free (old_state);
   return FALSE;
 }
 
@@ -259,9 +244,14 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
     g_variant_get (parameters, "(&st&s&s)", &id, &revision, &action, &payload); refresh_deadlines ();
     if (read_one (id, NULL, &old_state, &current, NULL, NULL) && current == (gint64) revision && g_str_equal (old_state, "active")) {
       if (g_str_equal (action, "dismiss")) state = "dismissed";
-      else if (g_str_equal (action, "snooze")) state = "snoozed";
+      else if (g_str_equal (action, "snooze")) {
+        gchar *end = NULL;
+        gint64 minutes = g_ascii_strtoll (payload, &end, 10);
+        if (payload && *payload && end && !*end && minutes >= 1 && minutes <= 10080)
+          state = "snoozed";
+      }
       else if (g_str_equal (action, "open") && g_str_equal (payload, "launched")) state = "dismissed";
-      if (state && sqlite3_prepare_v2 (db, "UPDATE alerts SET state=?,action=?,payload=?,revision=revision+1,snooze_until=? WHERE id=? AND revision=? AND state='active'", -1, &st, NULL) == SQLITE_OK) {
+      if (state && sqlite3_prepare_v2 (db, "UPDATE alerts SET state=?,action=?,payload=?,action_revision=revision+1,revision=revision+1,snooze_until=? WHERE id=? AND revision=? AND state='active'", -1, &st, NULL) == SQLITE_OK) {
         sqlite3_bind_text (st, 1, state, -1, SQLITE_STATIC); sqlite3_bind_text (st, 2, action, -1, SQLITE_TRANSIENT); sqlite3_bind_text (st, 3, payload ? payload : "", -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64 (st, 4, g_str_equal (action, "snooze") ? (gint64) time (NULL) + CLAMP (atoi (payload), 1, 10080) * 60 : 0);
         sqlite3_bind_text (st, 5, id, -1, SQLITE_TRANSIENT); sqlite3_bind_int64 (st, 6, revision);
@@ -291,7 +281,7 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
     sqlite3_finalize (st);
   } else if (g_str_equal (method, "List")) {
     sqlite3_stmt *st = NULL; GString *list = g_string_new ("["); gboolean first = TRUE; refresh_deadlines ();
-    if (sqlite3_prepare_v2 (db, "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until FROM alerts ORDER BY id", -1, &st, NULL) == SQLITE_OK) while (sqlite3_step (st) == SQLITE_ROW) {
+    if (sqlite3_prepare_v2 (db, "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until,action_revision FROM alerts ORDER BY id", -1, &st, NULL) == SQLITE_OK) while (sqlite3_step (st) == SQLITE_ROW) {
       gchar *item = row_json (st); if (!first) g_string_append_c (list, ','); g_string_append (list, item); g_free (item); first = FALSE;
     }
     sqlite3_finalize (st); g_string_append_c (list, ']'); g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", list->str)); g_string_free (list, TRUE);
@@ -333,15 +323,28 @@ int main (int argc, char **argv)
   }
   if (sqlite3_open (state_path, &db) != SQLITE_OK) { g_printerr ("open state db: %s\n", sqlite3_errmsg (db)); return 1; }
   sqlite3_busy_timeout (db, 5000); sqlite3_exec (db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;", NULL, NULL, NULL);
-  if (!exec_sql ("CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,destination TEXT NOT NULL,state TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,revision INTEGER NOT NULL,expires_at INTEGER NOT NULL,snooze_until INTEGER NOT NULL);", &error)) { g_printerr ("state schema: %s\n", error->message); return 1; }
+  if (!exec_sql ("CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,destination TEXT NOT NULL,state TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,revision INTEGER NOT NULL,expires_at INTEGER NOT NULL,snooze_until INTEGER NOT NULL,action_revision INTEGER NOT NULL DEFAULT 0);", &error)) { g_printerr ("state schema: %s\n", error->message); return 1; }
+  sqlite3_stmt *columns = NULL;
+  gboolean has_action_revision = FALSE;
+  if (sqlite3_prepare_v2 (db, "PRAGMA table_info(alerts)", -1, &columns, NULL) != SQLITE_OK) return 1;
+  while (sqlite3_step (columns) == SQLITE_ROW)
+    if (g_strcmp0 ((const gchar *) sqlite3_column_text (columns, 1), "action_revision") == 0) has_action_revision = TRUE;
+  sqlite3_finalize (columns);
+  if (!has_action_revision && !exec_sql ("ALTER TABLE alerts ADD COLUMN action_revision INTEGER NOT NULL DEFAULT 0", &error)) {
+    g_printerr ("state migration: %s\n", error->message); return 1;
+  }
   node = g_dbus_node_info_new_for_xml (introspection_xml, &error);
   if (!node) { g_printerr ("D-Bus schema: %s\n", error->message); return 1; }
   connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
   if (!connection) { g_printerr ("session bus: %s\n", error->message); return 1; }
   registration = g_dbus_connection_register_object (connection, OBJECT_PATH, node->interfaces[0], &vtable, NULL, NULL, &error);
   if (!registration) { g_printerr ("register API: %s\n", error->message); return 1; }
-  g_dbus_connection_call_sync (connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", g_variant_new ("(su)", BUS_NAME, 0u), G_VARIANT_TYPE ("(u)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
-  if (error) { g_printerr ("own API name: %s\n", error->message); return 1; }
+  GVariant *name_result = g_dbus_connection_call_sync (connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName", g_variant_new ("(su)", BUS_NAME, 4u), G_VARIANT_TYPE ("(u)"), G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+  if (!name_result) { g_printerr ("own API name: %s\n", error->message); return 1; }
+  guint name_status;
+  g_variant_get (name_result, "(u)", &name_status);
+  g_variant_unref (name_result);
+  if (name_status != 1) { g_printerr ("another reminder core already owns the session API\n"); return 1; }
   g_timeout_add_seconds (1, deadline_poll, NULL);
   g_print ("headless local alert core ready; state=%s\n", state_path);
   loop = g_main_loop_new (NULL, FALSE); g_main_loop_run (loop);

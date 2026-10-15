@@ -98,8 +98,9 @@ printf '%s\n' '{"id":"hook:build","title":"Build finished","body":"Review the re
 be namespaced, for example `timer:tea` or `homelab:garage-door`. Actions carry
 the revision shown by `status`; an old revision is rejected. Expiry is a Unix
 timestamp. Snooze deadline and action result survive core restarts. Snoozed
-alerts become active on the first service query after their deadline; session
-catch-up is therefore state-driven and does not replay expired alerts.
+alerts become active when the deadline poll observes their persisted deadline;
+expired alerts do not replay. `wait --after-revision` compares the stored action
+revision, so a later content update does not masquerade as another user action.
 
 To show a submitted synthetic alert in the existing large GTK overlay, run:
 
@@ -120,6 +121,7 @@ The default path is `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml`.
 uses `source-id/calendar-id` pairs: include mode with an empty list selects
 nothing, exclude mode selects everything except listed pairs, and all mode
 requires an empty list. `check-selection` exercises the same matcher without
-connecting to EDS; the core reloads the validated policy before each CLI
-request and rejects unselected source submissions. Audio fields are validated but report as unavailable, and
+connecting to EDS; the core enforces its active policy and rejects unselected source submissions.
+Use `reminderctl.py --config PATH reload` to explicitly change daemon policy;
+read-only CLI calls never replace it. Audio fields are validated but report as unavailable, and
 calendar listing is pending the next EDS adapter group.

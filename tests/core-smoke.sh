@@ -34,8 +34,6 @@ repeat_seconds = 0
 EOF
 
 /usr/bin/python3 "$cli" --config "$config" config-check >/dev/null
-[[ "$(/usr/bin/python3 "$cli" --config "$config" check-selection fixture selected | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["selected"])')" == True ]]
-[[ "$(/usr/bin/python3 "$cli" --config "$config" check-selection fixture other | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["selected"])')" == False ]]
 cat >"$tmp/bad.toml" <<'EOF'
 version = 1
 [selection]
@@ -110,5 +108,26 @@ assert_state expiry:fixture expired
 [[ "$(/usr/bin/python3 "$cli" --config "$config" act stale:fixture 1 dismiss | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')" == failed ]]
 /usr/bin/python3 "$cli" --config "$config" notify open:unverified Open --url https://example.org >/dev/null
 [[ "$(gdbus call --session --dest org.muness.CalendarReminderOverlay.Core --object-path /org/muness/CalendarReminderOverlay/Core --method org.muness.CalendarReminderOverlay.Core1.Act open:unverified 1 open '')" == "('failed',)" ]]
+# Content changes must not manufacture another user action result, and a
+# read-only client must not silently replace the service's selected calendars.
+/usr/bin/python3 - "$cli" "$config" "$tmp" <<'PYTEST'
+import json, pathlib, subprocess, sys
+cli, config, directory = sys.argv[1:]
+def run(*args, config_path=config):
+    return subprocess.run(['/usr/bin/python3', cli, '--config', config_path, *args], text=True, capture_output=True)
+assert run('notify','review:result','Result').returncode == 0
+assert run('act','review:result','1','dismiss').returncode == 0
+assert run('update','review:result','Changed title').returncode == 0
+assert run('wait','review:result','--after-revision','2','--timeout','1').returncode == 3
+other = pathlib.Path(directory)/'different.toml'
+other.write_text('version=1\n[selection]\nmode="all"\n')
+assert run('status','review:result',config_path=str(other)).returncode == 0
+rejected = run('notify','review:excluded','Excluded','--source-id','fixture','--calendar-id','other')
+assert rejected.returncode != 0, 'read-only status call broadened daemon selection'
+for invalid in ('version=true\n', 'version=1\n[reminders]\nfallback_lead_minutes=true\n', 'version=1\naudio=[]\n'):
+    other.write_text(invalid)
+    result = run('config-check',config_path=str(other))
+    assert result.returncode != 0 and 'Traceback' not in result.stderr, result.stderr
+PYTEST
 stop_core
-echo "core smoke checks passed"
+echo "core lifecycle and regression checks passed"

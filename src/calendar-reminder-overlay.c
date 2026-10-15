@@ -74,16 +74,17 @@ reminder_ui_free (gpointer data)
 	g_free (ui);
 }
 
-static void
+static gboolean
 local_action (ReminderUi *ui, const gchar *action, const gchar *payload)
 {
+	gboolean accepted = FALSE;
 	GError *error = NULL;
 	GDBusConnection *connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
 	GVariant *result;
 	if (!connection) {
 		g_warning ("Could not reach local alert core: %s", error ? error->message : "unknown error");
 		g_clear_error (&error);
-		return;
+		return FALSE;
 	}
 	result = g_dbus_connection_call_sync (connection,
 		"org.muness.CalendarReminderOverlay.Core", "/org/muness/CalendarReminderOverlay/Core",
@@ -94,12 +95,14 @@ local_action (ReminderUi *ui, const gchar *action, const gchar *payload)
 	else {
 		const gchar *status;
 		g_variant_get (result, "(&s)", &status);
-		if (!g_str_equal (status, "accepted"))
+		accepted = g_str_equal (status, "accepted");
+		if (!accepted)
 			g_warning ("Local alert action %s was rejected: stale revision or inactive alert", action);
 	}
 	g_clear_pointer (&result, g_variant_unref);
 	g_clear_error (&error);
 	g_object_unref (connection);
+	return accepted;
 }
 
 static void
@@ -108,6 +111,7 @@ finish_reminder (ReminderUi *ui, gboolean dismiss)
 	GError *error = NULL;
 	if (ui->finished)
 		return;
+	if (dismiss && ui->local && !local_action (ui, "dismiss", "")) return;
 	ui->finished = TRUE;
 	if (ui->countdown_source) {
 		g_source_remove (ui->countdown_source);
@@ -115,15 +119,15 @@ finish_reminder (ReminderUi *ui, gboolean dismiss)
 	}
 	if (active_reminders && ui->dedupe_key)
 		g_hash_table_remove (active_reminders, ui->dedupe_key);
-	if (dismiss && ui->local)
-		local_action (ui, "dismiss", "");
-	else if (dismiss && !ui->fallback && !ui->local && !e_reminder_watcher_dismiss_sync (watcher, ui->reminder, NULL, &error)) {
+	if (dismiss && !ui->fallback && !ui->local && !e_reminder_watcher_dismiss_sync (watcher, ui->reminder, NULL, &error)) {
 		g_warning ("Could not dismiss calendar reminder: %s", error ? error->message : "unknown error");
 		g_clear_error (&error);
 	}
 	if (ui->fallback && dismiss)
 		g_hash_table_add (fallback_dismissed, g_strdup (ui->dedupe_key));
+	gboolean local = ui->local;
 	gtk_window_destroy (ui->window);
+	if (local) g_application_quit (G_APPLICATION (application));
 }
 
 static gboolean
@@ -149,7 +153,7 @@ on_snooze_one_clicked (GtkButton *button, gpointer user_data)
 	ReminderUi *ui = user_data;
 	(void) button;
 	g_message ("Calendar reminder button: Snooze 1 minute");
-	if (ui->local) local_action (ui, "snooze", "1");
+	if (ui->local) { if (!local_action (ui, "snooze", "1")) return; }
 	else if (ui->fallback) {
 		FallbackAlarm *alarm = g_new0 (FallbackAlarm, 1);
 		alarm->reminder = e_reminder_data_copy (ui->reminder);
@@ -167,7 +171,7 @@ on_snooze_five_clicked (GtkButton *button, gpointer user_data)
 	ReminderUi *ui = user_data;
 	(void) button;
 	g_message ("Calendar reminder button: Snooze 5 minutes");
-	if (ui->local) local_action (ui, "snooze", "5");
+	if (ui->local) { if (!local_action (ui, "snooze", "5")) return; }
 	else if (ui->fallback) {
 		FallbackAlarm *alarm = g_new0 (FallbackAlarm, 1);
 		alarm->reminder = e_reminder_data_copy (ui->reminder);
@@ -189,8 +193,9 @@ on_snooze_until_start_clicked (GtkButton *button, gpointer user_data)
 	g_message ("Calendar reminder button: Snooze until event starts");
 	if (ui->local) {
 		gchar *minutes = g_strdup_printf ("%" G_GINT64_FORMAT, MAX ((gint64) 1, (ui->event_start - time (NULL)) / 60));
-		local_action (ui, "snooze", minutes);
+		gboolean accepted = local_action (ui, "snooze", minutes);
 		g_free (minutes);
+		if (!accepted) return;
 	}
 	else if (ui->fallback) {
 		FallbackAlarm *alarm = g_new0 (FallbackAlarm, 1);
@@ -259,7 +264,7 @@ on_open_meeting_clicked (GtkButton *button, gpointer user_data)
 		return;
 	}
 	if (ui->local) {
-		local_action (ui, "open", "launched");
+		if (!local_action (ui, "open", "launched")) return;
 		finish_reminder (ui, FALSE);
 	} else finish_reminder (ui, TRUE);
 }
