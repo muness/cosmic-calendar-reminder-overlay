@@ -56,7 +56,7 @@
 
 ## Draft review log
 
-Pending first Luna draft.
+Drafts are reviewed sequentially before integration.
 
 ### Draft #12 — core/configuration/CLI/state
 
@@ -75,3 +75,15 @@ Pending first Luna draft.
 **Decision:** ADJUST to the fixes above, then merge into the integration branch. No public interface stability is promised yet. Confidence is medium; cross-desktop/rendering evidence is still pending.
 
 **Verification:** `make check` passes lifecycle and new policy/action-revision regressions; isolated review probes changed from reproducing both policy/result bugs to passing. A sanitized core startup no longer reports the demonstrated use-after-free. Live UI button/render behavior is not yet claimed.
+
+### Draft #13 — native EDS delivery, live watch and playback
+
+**Review:** ADJUST, then merge as the first part of group 2. Native scheduling is opt-in; the core receives selected EDS alarms and delegates their actions. The shared GTK watch uses persisted state, retains meeting links and exact event-start snooze. A second sequential draft must finish fallback reconciliation, policy application and output copies before packaging.
+
+**Corrections from coordinator review:** Audio polling initially replayed one-shot playback and defeated stop; admission now starts playback and content updates preserve suppression. Expired submissions stay silent. Native snoozes are excluded from local deadline authority; unresolved native actions fail rather than silently changing only SQLite. Configuration defaults are normalized. Playback shutdown checks now wait for a fresh child PID rather than passing against a stale PID. Legacy renderer startup requires an explicit mode. The frozen draft still returned a malformed `Get` tuple: a real D-Bus call timed out with expected `(sssstt)`, got `(ssstt)`. Corrected core and frontend signatures and added a real API call regression. Report unsuccessful playback subprocesses as failures rather than treating process exit as successful audio.
+
+**Dissent:** Reusing EDS ownership avoids a second native scheduler, but a green headless suite did not establish a working renderer protocol. Functional pre-mortem: the UI cannot fetch an active event. Adoption pre-mortem: failed links/actions vanish without resolution. Opportunity-cost pre-mortem: retaining the old scanner alongside a new core grows two implementations. The first failure was reproduced and fixed; the renderer remains visually unverified, and the old scanner must be removed in the next group-2 draft. The weakest assumption is restoration and reconciliation of native state after asynchronous EDS startup; the next draft must exercise that boundary rather than count pointer lookup failure as complete recovery.
+
+**Verification:** `make check` passes after the tuple fix, including native-owned persisted snooze exclusion, unavailable-native-action failure, exact timestamp snooze, playback repetition/suppression and shutdown with stub processes. A sanitized isolated startup with minimal config reports no demonstrated AddressSanitizer/UndefinedBehaviorSanitizer error. No live calendar, actual sound or compositor display was exercised. Actual EDS native trigger/action delivery and each target compositor remain human/session verification boundaries.
+
+**Decision:** Continue with group 2b; no epic issue is closed from this intermediate draft. Current selection reload does not yet reconcile existing native records or enable/disable the watcher; that is required follow-up before the test branch is handed off.

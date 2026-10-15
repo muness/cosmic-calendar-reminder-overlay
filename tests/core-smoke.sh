@@ -82,6 +82,11 @@ accepted = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'notify'
 assert accepted.returncode == 0, accepted.stderr
 rejected = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'notify', '--json'], input=json.dumps({'id':'json:rejected','title':'Unselected','source_id':'fixture','calendar_id':'other'}), text=True, capture_output=True)
 assert rejected.returncode != 0, 'service admitted an unselected calendar'
+import gi
+from gi.repository import Gio, GLib
+connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+preview = connection.call_sync('org.muness.CalendarReminderOverlay.Core', '/org/muness/CalendarReminderOverlay/Core', 'org.muness.CalendarReminderOverlay.Core1', 'Get', GLib.Variant('(s)', ('json:accepted',)), GLib.VariantType.new('(sssstt)'), Gio.DBusCallFlags.NONE, 2000, None).unpack()
+assert preview == ('JSON input', '', '', 'active', 1, 0), preview
 PY
 /usr/bin/python3 "$cli" --config "$config" notify timer:tea Tea --body "boil water" >/dev/null
 [[ "$(/usr/bin/python3 "$cli" --config "$config" act timer:tea 1 snooze --minutes 10080 | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')" == accepted ]]

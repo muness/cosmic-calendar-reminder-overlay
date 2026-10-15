@@ -146,6 +146,8 @@ audio_finished (GObject *source, GAsyncResult *result, gpointer user_data)
 		g_debug ("Audio playback ended: %s", error ? error->message : "unknown error");
 		g_clear_error (&error);
 	}
+	else if (audio_process == process && !g_subprocess_get_successful (process))
+		g_warning ("Audible reminder playback failed; check the audio file and output device");
 	if (audio_process == process) g_clear_object (&audio_process);
 }
 
@@ -606,7 +608,7 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
       if (sqlite3_step (st) == SQLITE_ROW) {
         const gchar *state = (const gchar *) sqlite3_column_text (st, 4);
         if (g_str_equal (state, "active"))
-		  g_dbus_method_invocation_return_value (invocation, g_variant_new ("(ssstt)", sqlite3_column_text (st, 0), sqlite3_column_text (st, 1), sqlite3_column_text (st, 2), state, sqlite3_column_int64 (st, 3), sqlite3_column_int64 (st, 5)));
+		  g_dbus_method_invocation_return_value (invocation, g_variant_new ("(sssstt)", sqlite3_column_text (st, 0), sqlite3_column_text (st, 1), sqlite3_column_text (st, 2), state, sqlite3_column_int64 (st, 3), sqlite3_column_int64 (st, 5)));
         else
           g_dbus_method_invocation_return_error (invocation, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "alert is not active");
       } else g_dbus_method_invocation_return_error (invocation, G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "alert not found");

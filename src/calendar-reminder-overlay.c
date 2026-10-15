@@ -507,7 +507,7 @@ show_synthetic_alert (void)
 	if (!connection) { g_warning ("Synthetic mode needs the local alert core: %s", error->message); g_clear_error (&error); return FALSE; }
 	result = g_dbus_connection_call_sync (connection, "org.muness.CalendarReminderOverlay.Core",
 		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "Get",
-		g_variant_new ("(s)", synthetic_alert_id), G_VARIANT_TYPE ("(ssstt)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &error);
+		g_variant_new ("(s)", synthetic_alert_id), G_VARIANT_TYPE ("(sssstt)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &error);
 	if (!result) { g_warning ("Synthetic alert unavailable: %s", error->message); g_clear_error (&error); g_object_unref (connection); return FALSE; }
 	g_variant_get (result, "(&s&s&s&stt)", &title, &body, &url, &state, &revision, &event_start);
 	if (!g_hash_table_contains (active_reminders, synthetic_alert_id)) {
