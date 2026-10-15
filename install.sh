@@ -28,23 +28,39 @@ for artifact in build/reminder-core build/calendar-reminder-overlay src/reminder
   [[ -f "$root/$artifact" ]] || { echo "Build did not produce $artifact" >&2; exit 1; }
 done
 
-mkdir -p "$install_root/build" "$install_root/src" "$bin_dir" "$unit_dir"
+config_file="${config_home}/calendar-reminder-overlay/config.toml"
+candidate_config="$(mktemp)"
+trap 'rm -f "$candidate_config"' EXIT
+if [[ -e "$config_file" ]]; then
+  config_to_validate="$config_file"
+else
+  cat >"$candidate_config" <<'CONFIG'
+version = 1
+
+[selection]
+mode = "include"
+calendars = []
+CONFIG
+  chmod 0600 "$candidate_config"
+  config_to_validate="$candidate_config"
+fi
+
+# Validate the source helper and the exact config that would be installed before
+# changing the installed payload, launchers, service unit, or legacy service.
+if ! /usr/bin/python3 "$root/src/reminderctl.py" --config "$config_to_validate" config-check >/dev/null; then
+  echo "Configuration validation failed: $config_file" >&2
+  exit 1
+fi
+
+mkdir -p "$install_root/build" "$install_root/src" "$bin_dir" "$unit_dir" "$(dirname -- "$config_file")"
 install -m 0755 "$root/build/reminder-core" "$install_root/build/reminder-core"
 install -m 0755 "$root/build/calendar-reminder-overlay" "$install_root/build/calendar-reminder-overlay"
 install -m 0644 "$root/src/reminderctl.py" "$install_root/src/reminderctl.py"
 install -m 0644 "$root/config.example.toml" "$install_root/config.example.toml"
-
-# Existing configuration is user data: validate it if present, otherwise seed
-# the safe example (which selects no calendars) without overwriting anything.
-config_file="${config_home}/calendar-reminder-overlay/config.toml"
-mkdir -p "$(dirname -- "$config_file")"
+# Do not replace a config that appeared after validation (for example, a
+# concurrent first-run); source it into place only when no config exists.
 if [[ ! -e "$config_file" ]]; then
-  sed -E 's/^calendars = \[.*\]$/calendars = []/' "$root/config.example.toml" >"$config_file"
-  chmod 0600 "$config_file"
-fi
-if ! /usr/bin/python3 "$install_root/src/reminderctl.py" --config "$config_file" config-check >/dev/null; then
-  echo "Configuration validation failed: $config_file" >&2
-  exit 1
+  install -m 0600 "$candidate_config" "$config_file"
 fi
 
 cat >"${bin_dir}/calendar-reminder-overlay-service" <<'LAUNCHER'
@@ -90,22 +106,26 @@ if capabilities="$("$root/build/calendar-reminder-overlay" --capabilities 2>/dev
 else
   echo 'Unavailable: installed renderer does not expose --capabilities.'
 fi
-echo 'Installed core bus owner (runtime evidence):'
+echo 'Core alerts/state (runtime evidence; calls cannot auto-start services):'
 if ! command -v busctl >/dev/null; then
-  echo 'Core owner status unavailable: busctl is not installed.'
-elif busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core >/dev/null 2>&1; then
-  busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core | sed -n '1,5p'
-  echo 'Core alerts/state (read-only CLI query):'
-  /usr/bin/python3 "$root/src/reminderctl.py" --config "$config" \
-    --core "$root/build/reminder-core" list || true
+  echo 'Unavailable: busctl is not installed.'
+else
+  if owner="$(busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core 2>/dev/null)"; then
+    printf '%s\n' "$owner" | sed -n '1,5p'
+  else
+    echo 'No running core owner detected.'
+  fi
+  if ! busctl --user --auto-start=no call org.muness.CalendarReminderOverlay.Core \
+    /org/muness/CalendarReminderOverlay/Core \
+    org.muness.CalendarReminderOverlay.Core1 List 2>/dev/null; then
+    echo 'Core alert list unavailable (core is stopped or this version lacks List).'
+  fi
   echo 'EDS source freshness/errors (core runtime diagnostics):'
-  if ! busctl --user call org.muness.CalendarReminderOverlay.Core \
+  if ! busctl --user --auto-start=no call org.muness.CalendarReminderOverlay.Core \
     /org/muness/CalendarReminderOverlay/Core \
     org.muness.CalendarReminderOverlay.Core1 Diagnostics 2>/dev/null; then
-    echo 'Unavailable: the running core does not expose Diagnostics.'
+    echo 'Unavailable: core is stopped or does not expose Diagnostics.'
   fi
-else
-  echo 'No running core owner detected.'
 fi
 if command -v systemctl >/dev/null; then
   printf 'User service state: '
@@ -134,7 +154,9 @@ if [[ "$activate" == true ]]; then
     systemctl --user stop "$legacy_unit"
   fi
   systemctl --user enable calendar-reminder-overlay.service
-  if systemctl --user is-active --quiet calendar-reminder-overlay.service 2>/dev/null; then
+  if ! systemctl --user is-active --quiet graphical-session.target 2>/dev/null; then
+    echo 'Enabled for the next graphical session; not started outside a graphical session.'
+  elif systemctl --user is-active --quiet calendar-reminder-overlay.service 2>/dev/null; then
     systemctl --user restart calendar-reminder-overlay.service
   else
     systemctl --user start calendar-reminder-overlay.service

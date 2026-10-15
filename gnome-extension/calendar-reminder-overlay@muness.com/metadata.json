@@ -1,0 +1,7 @@
+{
+  "uuid": "calendar-reminder-overlay@muness.com",
+  "name": "Calendar Reminder Overlay (experimental)",
+  "description": "Experimental Mutter stacking helper for the GTK reminder overlay",
+  "session-modes": ["user"],
+  "shell-version": ["51"]
+}

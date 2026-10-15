@@ -6,7 +6,7 @@ This repository is an active implementation. A previous COSMIC setup was accepte
 
 ## Build and install
 
-Build dependencies include a C compiler, `make`, GTK4, GTK4 Layer Shell, Evolution Data Server, GIO, SQLite, and JSON-GLib. `make` builds the core and renderer; `make check` runs the local core lifecycle checks.
+Build dependencies include a C compiler, `make`, GTK4, GTK4 Layer Shell, Evolution Data Server, GIO, SQLite, and JSON-GLib. Runtime needs `/usr/bin/python3` with PyGObject's Gio and GLib bindings. Audio playback is optional and requires PipeWire's `pw-play` when enabled in config. `make` builds the core and renderer; `make check` runs the local core lifecycle checks.
 
 ```sh
 make
@@ -14,7 +14,7 @@ make check
 ./install.sh
 ```
 
-`install.sh` builds and stages the files under `$XDG_DATA_HOME/calendar-reminder-overlay` (default: `~/.local/share`), creates a `reminderctl` command in `~/.local/bin`, and installs the user service file. It does not enable or start the service. The first configuration is created at `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml` (default: `~/.config`) with an empty calendar selection. Existing configuration is preserved and validated.
+`install.sh` builds and stages the files under `$XDG_DATA_HOME/calendar-reminder-overlay` (default: `~/.local/share`), creates `reminderctl` and `reminder-diagnostics` commands in `~/.local/bin`, and installs the user service file. It does not enable or start the service. The first configuration is created at `$XDG_CONFIG_HOME/calendar-reminder-overlay/config.toml` (default: `~/.config`) with an empty calendar selection. Existing configuration is validated before installed files are replaced.
 
 Review the configuration, then explicitly activate the service:
 
@@ -23,7 +23,7 @@ ${EDITOR:-vi} "${XDG_CONFIG_HOME:-$HOME/.config}/calendar-reminder-overlay/confi
 ./install.sh --activate
 ```
 
-On activation, the installer replaces the named `calendar-reminder-overlay.service`. If the old `evolution-dunst-reminders.service` is enabled or active, it disables/stops that legacy unit after validating the new files and config. It does not change Dunst, SwayNC, or another notification daemon. The old executable is left in place for manual review.
+On activation, the installer enables `calendar-reminder-overlay.service` for `graphical-session.target` and starts or restarts it when that target is active. If activated from a text session, it leaves the unit enabled for the next graphical session without starting it. The unit stops when the graphical session ends. If the old `evolution-dunst-reminders.service` is enabled or active, it disables/stops that legacy unit after validating the new files and config. It does not change Dunst, SwayNC, or another notification daemon. The old executable is left in place for manual review.
 
 Configuration uses strict versioned TOML; see [config.example.toml](config.example.toml). Set `[calendar].eds_enabled = true` to connect to EDS, and select calendars using `source-id/calendar-id` strings in `[selection]`. Include mode with an empty list selects nothing. `reminderctl config-check` validates configuration without starting the service. `reminderctl calendars` lists configured EDS calendars read-only.
 
@@ -45,7 +45,7 @@ reminderctl notify synthetic:demo "Synthetic reminder" \
   --body "A demo alert" --url https://example.org --show
 ```
 
-The demo does not enroll a calendar or run automatically during installation. `reminder-diagnostics` reports installed paths, config validation, renderer capability evidence when supported, any already-running core's alerts and EDS freshness/errors when exposed, service state, and recent service warnings. It does not start the service or play audio; a missing capability or diagnostics method is reported as unavailable.
+The demo does not enroll a calendar or run automatically during installation. `reminder-diagnostics` reports installed paths, config validation, renderer capability evidence when supported, any already-running core's alerts and EDS freshness/errors when exposed, service state, and recent service warnings. It does not start the service or play audio; its core queries disable D-Bus auto-start, and a missing capability or diagnostics method is reported as unavailable.
 
 ## Uninstall
 
@@ -57,7 +57,7 @@ This removes the owned service unit, launchers, and installed binaries while pre
 
 ## Desktop compatibility
 
-The GTK Layer Shell renderer targets compositors that implement its overlay layer. The COSMIC legacy user acceptance does not establish that this branch works there. Hyprland, KDE Plasma Wayland, and GNOME have not been tested in this work. GNOME's window-management route remains experimental and is not included as a supported renderer. Details and limits are in [docs/compatibility.md](docs/compatibility.md).
+The GTK Layer Shell renderer targets compositors that implement its overlay layer. The COSMIC legacy user acceptance does not establish that this branch works there. Hyprland and KDE Plasma Wayland have not been tested in this work. An optional GNOME Shell helper prototype is in [gnome-extension](gnome-extension/README.md); it is not installed or enabled by the installer and has not been tested in a GNOME session. Details and limits are in [docs/compatibility.md](docs/compatibility.md).
 
 ## Akonadi discovery
 
