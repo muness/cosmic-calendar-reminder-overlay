@@ -24,7 +24,7 @@ legacy_unit="evolution-dunst-reminders.service"
 
 command -v make >/dev/null || { echo 'make is required' >&2; exit 1; }
 make -C "$root" all
-for artifact in build/reminder-core build/calendar-reminder-overlay src/reminderctl.py; do
+for artifact in build/reminder-core build/calendar-reminder-overlay src/reminderctl.py scripts/reminder-demo scripts/reminder-diagnostics scripts/reminder-setup-help; do
   [[ -f "$root/$artifact" ]] || { echo "Build did not produce $artifact" >&2; exit 1; }
 done
 
@@ -85,60 +85,9 @@ exec /usr/bin/python3 "${data_home}/calendar-reminder-overlay/src/reminderctl.py
 CLI
 chmod 0755 "${bin_dir}/reminderctl"
 
-cat >"${bin_dir}/reminder-diagnostics" <<'DIAG'
-#!/usr/bin/env bash
-set -euo pipefail
-config_home="${XDG_CONFIG_HOME:-${HOME:?HOME must be set}/.config}"
-data_home="${XDG_DATA_HOME:-${HOME:?HOME must be set}/.local/share}"
-state_home="${XDG_STATE_HOME:-${HOME:?HOME must be set}/.local/state}"
-root="${data_home}/calendar-reminder-overlay"
-config="${config_home}/calendar-reminder-overlay/config.toml"
-printf 'Install root: %s\nConfig: %s\nState DB: %s/calendar-reminder-overlay/alerts.sqlite3\n' \
-  "$root" "$config" "$state_home"
-for path in "$root/build/reminder-core" "$root/build/calendar-reminder-overlay" "$root/src/reminderctl.py" "$config" "$state_home/calendar-reminder-overlay/alerts.sqlite3"; do
-  if [[ -e "$path" ]]; then printf 'Present: %s\n' "$path"; else printf 'Missing: %s\n' "$path"; fi
-done
-echo 'Configuration validation:'
-/usr/bin/python3 "$root/src/reminderctl.py" --config "$config" config-check || true
-echo 'Renderer capability report:'
-if capabilities="$("$root/build/calendar-reminder-overlay" --capabilities 2>/dev/null)"; then
-  printf '%s\n' "$capabilities"
-else
-  echo 'Unavailable: installed renderer does not expose --capabilities.'
-fi
-echo 'Core alerts/state (runtime evidence; calls cannot auto-start services):'
-if ! command -v busctl >/dev/null; then
-  echo 'Unavailable: busctl is not installed.'
-else
-  if owner="$(busctl --user --no-pager status org.muness.CalendarReminderOverlay.Core 2>/dev/null)"; then
-    printf '%s\n' "$owner" | sed -n '1,5p'
-  else
-    echo 'No running core owner detected.'
-  fi
-  if ! busctl --user --auto-start=no call org.muness.CalendarReminderOverlay.Core \
-    /org/muness/CalendarReminderOverlay/Core \
-    org.muness.CalendarReminderOverlay.Core1 List 2>/dev/null; then
-    echo 'Core alert list unavailable (core is stopped or this version lacks List).'
-  fi
-  echo 'EDS source freshness/errors (core runtime diagnostics):'
-  if ! busctl --user --auto-start=no call org.muness.CalendarReminderOverlay.Core \
-    /org/muness/CalendarReminderOverlay/Core \
-    org.muness.CalendarReminderOverlay.Core1 Diagnostics 2>/dev/null; then
-    echo 'Unavailable: core is stopped or does not expose Diagnostics.'
-  fi
-fi
-if command -v systemctl >/dev/null; then
-  printf 'User service state: '
-  systemctl --user is-active calendar-reminder-overlay.service 2>/dev/null || true
-fi
-if command -v journalctl >/dev/null; then
-  echo 'Recent service diagnostics (warnings/errors):'
-  journalctl --user -u calendar-reminder-overlay.service -p warning --no-pager -n 20 2>/dev/null || true
-fi
-echo 'Capability notes: renderer capabilities describe detected process support; runtime output above is separate evidence.'
-echo 'Calendar listing and playback are not probed here; no service is started and no audio is played.'
-DIAG
-chmod 0755 "${bin_dir}/reminder-diagnostics"
+install -m 0755 "$root/scripts/reminder-demo" "${bin_dir}/reminder-demo"
+install -m 0755 "$root/scripts/reminder-diagnostics" "${bin_dir}/reminder-diagnostics"
+install -m 0755 "$root/scripts/reminder-setup-help" "${bin_dir}/reminder-setup-help"
 
 install -m 0644 "$root/systemd/calendar-reminder-overlay.service" "$unit_file"
 

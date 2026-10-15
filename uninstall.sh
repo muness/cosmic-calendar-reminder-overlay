@@ -22,6 +22,8 @@ rm -f "$unit" \
   "${HOME}/.local/bin/calendar-reminder-overlay-service" \
   "${HOME}/.local/bin/reminderctl" \
   "${HOME}/.local/bin/reminder-diagnostics" \
+  "${HOME}/.local/bin/reminder-demo" \
+  "${HOME}/.local/bin/reminder-setup-help" \
   "${data_home}/calendar-reminder-overlay/build/reminder-core" \
   "${data_home}/calendar-reminder-overlay/build/calendar-reminder-overlay" \
   "${data_home}/calendar-reminder-overlay/src/reminderctl.py" \
