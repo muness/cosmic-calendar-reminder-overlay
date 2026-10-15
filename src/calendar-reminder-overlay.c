@@ -2,69 +2,48 @@
 #include <gio/gio.h>
 #include <gtk/gtk.h>
 #include <gtk4-layer-shell/gtk4-layer-shell.h>
-#include <libecal/libecal.h>
 #include <json-glib/json-glib.h>
 
 typedef struct {
-	EReminderData *reminder;
 	gchar *meeting_url;
 	GtkWindow *window;
 	GtkLabel *countdown;
+	GtkLabel *status;
+	GtkWidget *until_button;
 	guint countdown_source;
 	gchar *dedupe_key;
+	gchar *source_id;
+	gchar *calendar_id;
 	gint64 event_start;
 	gboolean finished;
-	gboolean fallback;
+	gboolean pending_action;
+	guint64 generation;
 	gboolean local;
 	guint64 local_revision;
 } ReminderUi;
 
-static EReminderWatcher *watcher;
-static ESourceRegistry *registry;
 static GtkApplication *application;
 static GHashTable *active_reminders;
-static GHashTable *fallback_clients;
-static GHashTable *fallback_scheduled;
-static GHashTable *fallback_dismissed;
-static guint fallback_poll_source;
-static guint fallback_lead_minutes = 5;
 static gboolean layer_shell_supported;
 static gchar *synthetic_alert_id;
 static gboolean watch_mode;
 static guint watch_poll_source;
 static ReminderUi *watch_current_ui;
-
-typedef struct {
-	EReminderData *reminder;
-	gint64 event_start;
-	gchar *key;
-	guint source_id;
-} FallbackAlarm;
-
-static void fallback_alarm_free (gpointer data);
-static void show_reminder_full (EReminderData *reminder, gboolean fallback);
-
-static gboolean
-fallback_timeout_cb (gpointer data)
-{
-	FallbackAlarm *alarm = data;
-	alarm->source_id = 0;
-	if (!g_hash_table_contains (active_reminders, alarm->key))
-		show_reminder_full (alarm->reminder, TRUE);
-	g_hash_table_remove (fallback_scheduled, alarm->key);
-	return G_SOURCE_REMOVE;
-}
-
-static void
-fallback_alarm_free (gpointer data)
-{
-	FallbackAlarm *alarm = data;
-	if (!alarm) return;
-	if (alarm->source_id) g_source_remove (alarm->source_id);
-	e_reminder_data_free (alarm->reminder);
-	g_free (alarm->key);
-	g_free (alarm);
-}
+static GDBusConnection *core_connection;
+static gboolean watch_refreshing;
+static gboolean watch_action_pending;
+static gboolean policy_changed;
+static GPtrArray *watch_views;
+static GtkCssProvider *application_css;
+static gchar *outputs_mode;
+static GArray *active_snooze_minutes;
+static JsonNode *current_policy;
+static gchar *display_backend;
+static guint64 ui_generation;
+static GListModel *monitor_model;
+static GdkMonitor *preferred_monitor (GdkDisplay *display);
+static gboolean refresh_watch (gpointer user_data);
+static void finish_reminder (ReminderUi *ui, gboolean dismiss);
 
 static void
 reminder_ui_free (gpointer data)
@@ -72,61 +51,167 @@ reminder_ui_free (gpointer data)
 	ReminderUi *ui = data;
 	if (!ui)
 		return;
-	if (ui->reminder) e_reminder_data_free (ui->reminder);
 	g_free (ui->meeting_url);
 	g_free (ui->dedupe_key);
+	g_free (ui->source_id);
+	g_free (ui->calendar_id);
 	g_free (ui);
 }
 
-static gboolean
+static void
+local_action_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	GtkWindow *window = user_data;
+	ReminderUi *ui = g_object_get_data (G_OBJECT (window), "reminder-ui");
+	GError *error = NULL;
+	GVariant *response = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source), result, &error);
+	if (!ui || ui->finished || ui->generation != ui_generation) {
+		if (response) g_variant_unref (response);
+		g_clear_error (&error);
+		g_object_unref (window);
+		return;
+	}
+	ui->pending_action = FALSE;
+	watch_action_pending = FALSE;
+	for (guint i = 0; watch_views && i < watch_views->len; i++) {
+		GtkWindow *copy_window = g_ptr_array_index (watch_views, i);
+		ReminderUi *copy = g_object_get_data (G_OBJECT (copy_window), "reminder-ui");
+		if (copy) copy->pending_action = FALSE;
+	}
+	if (response) {
+		const gchar *answer;
+		g_variant_get (response, "(&s)", &answer);
+		if (g_str_equal (answer, "accepted")) {
+			g_variant_unref (response);
+			finish_reminder (ui, FALSE);
+			g_object_unref (window);
+			return;
+		}
+		g_variant_unref (response);
+	}
+	gtk_label_set_text (ui->status, "The reminder service did not accept that action. Try again or choose another button.");
+	for (guint i = 0; watch_views && i < watch_views->len; i++) {
+		GtkWindow *copy_window = g_ptr_array_index (watch_views, i);
+		ReminderUi *copy = g_object_get_data (G_OBJECT (copy_window), "reminder-ui");
+		if (copy) gtk_label_set_text (copy->status, "The reminder service did not accept that action. Try again or choose another button.");
+	}
+	g_clear_error (&error);
+	g_object_unref (window);
+}
+
+static void
 local_action (ReminderUi *ui, const gchar *action, const gchar *payload)
 {
-	gboolean accepted = FALSE;
-	GError *error = NULL;
-	GDBusConnection *connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
-	GVariant *result;
-	if (!connection) {
-		g_warning ("Could not reach local alert core: %s", error ? error->message : "unknown error");
-		g_clear_error (&error);
-		return FALSE;
+	if (watch_action_pending || ui->pending_action || ui->finished || !core_connection) return;
+	ui->pending_action = TRUE;
+	watch_action_pending = TRUE;
+	gtk_label_set_text (ui->status, "Working…");
+	for (guint i = 0; watch_views && i < watch_views->len; i++) {
+		GtkWindow *window = g_ptr_array_index (watch_views, i);
+		ReminderUi *copy = g_object_get_data (G_OBJECT (window), "reminder-ui");
+		if (copy) { copy->pending_action = TRUE; gtk_label_set_text (copy->status, "Working…"); }
 	}
-	result = g_dbus_connection_call_sync (connection,
-		"org.muness.CalendarReminderOverlay.Core", "/org/muness/CalendarReminderOverlay/Core",
-		"org.muness.CalendarReminderOverlay.Core1", "Act",
+	g_dbus_connection_call (core_connection, "org.muness.CalendarReminderOverlay.Core",
+		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "Act",
 		g_variant_new ("(stss)", ui->dedupe_key, ui->local_revision, action, payload ? payload : ""),
-		G_VARIANT_TYPE ("(s)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &error);
-	if (!result) g_warning ("Local alert action %s failed: %s", action, error ? error->message : "unknown error");
-	else {
-		const gchar *status;
-		g_variant_get (result, "(&s)", &status);
-		accepted = g_str_equal (status, "accepted");
-		if (!accepted)
-			g_warning ("Local alert action %s was rejected: stale revision or inactive alert", action);
+		G_VARIANT_TYPE ("(s)"), G_DBUS_CALL_FLAGS_NONE, 8000, NULL, local_action_done, g_object_ref (ui->window));
+}
+
+static void
+clear_watch_views (void)
+{
+	watch_current_ui = NULL;
+	ui_generation++;
+	watch_action_pending = FALSE;
+	if (!watch_views) return;
+	for (guint i = 0; i < watch_views->len; i++) {
+		GtkWindow *window = g_ptr_array_index (watch_views, i);
+		ReminderUi *ui = g_object_get_data (G_OBJECT (window), "reminder-ui");
+		if (ui) {
+			ui->finished = TRUE;
+			if (ui->countdown_source) { g_source_remove (ui->countdown_source); ui->countdown_source = 0; }
+		}
+		gtk_window_destroy (window);
 	}
-	g_clear_pointer (&result, g_variant_unref);
-	g_clear_error (&error);
-	g_object_unref (connection);
-	return accepted;
+	g_ptr_array_set_size (watch_views, 0);
 }
 
 static void
 local_stop_audio (void)
 {
-	GError *error = NULL;
-	GDBusConnection *connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
-	if (!connection) { g_debug ("Could not stop reminder audio: %s", error ? error->message : "unknown error"); g_clear_error (&error); return; }
-	g_dbus_connection_call (connection, "org.muness.CalendarReminderOverlay.Core", "/org/muness/CalendarReminderOverlay/Core",
+	if (!core_connection) return;
+	g_dbus_connection_call (core_connection, "org.muness.CalendarReminderOverlay.Core", "/org/muness/CalendarReminderOverlay/Core",
 		"org.muness.CalendarReminderOverlay.Core1", "StopAudio", NULL, NULL, G_DBUS_CALL_FLAGS_NONE, 1000, NULL, NULL, NULL);
-	g_object_unref (connection);
+}
+
+static void
+apply_policy_json (const gchar *json)
+{
+	GError *error = NULL;
+	JsonParser *parser = json_parser_new ();
+	if (!json_parser_load_from_data (parser, json, -1, &error)) {
+		g_debug ("Renderer policy is invalid: %s", error ? error->message : "invalid JSON");
+		g_clear_error (&error); g_object_unref (parser); return;
+	}
+	policy_changed = current_policy == NULL ||
+		!json_node_equal (current_policy, json_parser_get_root (parser));
+	g_clear_pointer (&current_policy, json_node_unref);
+	current_policy = json_node_copy (json_parser_get_root (parser));
+	JsonObject *root = json_node_get_object (current_policy);
+	JsonObject *display = json_object_get_object_member (root, "display");
+	JsonObject *appearance = json_object_get_object_member (root, "appearance");
+	JsonArray *minutes = json_object_get_array_member (json_object_get_object_member (root, "snooze"), "minutes");
+	g_free (outputs_mode); outputs_mode = g_strdup (display ? json_object_get_string_member (display, "outputs") : "all");
+	g_free (display_backend); display_backend = g_strdup (display ? json_object_get_string_member (display, "backend") : "native");
+	g_clear_pointer (&active_snooze_minutes, g_array_unref);
+	active_snooze_minutes = g_array_new (FALSE, FALSE, sizeof (guint));
+	if (minutes) for (guint i = 0; i < json_array_get_length (minutes); i++) {
+		guint value = (guint) json_array_get_int_element (minutes, i);
+		g_array_append_val (active_snooze_minutes, value);
+	}
+	if (!active_snooze_minutes->len) { guint defaults[] = { 1, 5 }; g_array_append_vals (active_snooze_minutes, defaults, G_N_ELEMENTS (defaults)); }
+	if (application_css) {
+		const gchar *theme = appearance ? json_object_get_string_member (appearance, "theme") : "default";
+		const gchar *bg = g_strcmp0 (theme, "light") == 0 ? "#f4f5f7" : "#151821";
+		const gchar *fg = g_strcmp0 (theme, "light") == 0 ? "#16181d" : "#f4f5f7";
+		const gchar *accent = g_strcmp0 (theme, "light") == 0 ? "#244f9b" : "#a9c7ff";
+		const gchar *action_bg = g_strcmp0 (theme, "light") == 0 ? "#e3e8f0" : "#303745";
+		const gchar *primary_bg = g_strcmp0 (theme, "light") == 0 ? "#d3e2fb" : "#294e86";
+		const gchar *snooze_bg = g_strcmp0 (theme, "light") == 0 ? "#eef1f5" : "#232a36";
+		const gchar *border = g_strcmp0 (theme, "light") == 0 ? "#718097" : "#606b7d";
+		const gchar *disabled_fg = g_strcmp0 (theme, "light") == 0 ? "#626a76" : "#a9b0ba";
+		gchar *css = g_strdup_printf (".reminder-overlay { background: %s; color: %s; }.reminder-title { font-size: 38pt; font-weight: 700; }.reminder-details { font-size: 23pt; }.reminder-status { font-size: 20pt; color: %s; min-height: 42px; }.reminder-hint { font-size: 15pt; opacity: 0.9; }.reminder-group-heading { font-size: 17pt; font-weight: 700; margin-top: 8px; }.reminder-action { font-size: 23pt; font-weight: 650; padding: 22px 30px; min-width: 170px; min-height: 78px; color: %s; background: %s; border: 2px solid %s; border-radius: 8px; }.reminder-primary { background: %s; border-color: %s; }.reminder-secondary { background: %s; }.reminder-snooze { background: %s; }.reminder-action:focus { outline: 4px solid %s; outline-offset: 3px; }.reminder-action:hover { border-color: %s; }.reminder-action:disabled { color: %s; background: %s; border-color: %s; }", bg, fg, accent, fg, action_bg, border, primary_bg, accent, action_bg, snooze_bg, accent, accent, disabled_fg, action_bg, border);
+		gtk_css_provider_load_from_string (application_css, css);
+		g_free (css);
+	}
+	g_object_unref (parser);
+}
+
+static GdkMonitor *
+preferred_monitor (GdkDisplay *display)
+{
+	GListModel *monitors = gdk_display_get_monitors (display);
+	GdkMonitor *primary = g_list_model_get_n_items (monitors) ? g_list_model_get_item (monitors, 0) : NULL;
+	if (outputs_mode && g_str_has_prefix (outputs_mode, "connector:")) {
+		for (guint i = 0; i < g_list_model_get_n_items (monitors); i++) {
+			GdkMonitor *candidate = g_list_model_get_item (monitors, i);
+			gboolean match = g_strcmp0 (gdk_monitor_get_connector (candidate), outputs_mode + strlen ("connector:")) == 0;
+			if (match) { g_clear_object (&primary); return candidate; }
+			g_object_unref (candidate);
+		}
+		g_clear_object (&primary);
+		return NULL;
+	}
+	return primary;
 }
 
 static void
 finish_reminder (ReminderUi *ui, gboolean dismiss)
 {
-	GError *error = NULL;
+	gboolean local = ui->local;
+	(void) dismiss;
 	if (ui->finished)
 		return;
-	if (dismiss && ui->local && !local_action (ui, "dismiss", "")) return;
 	ui->finished = TRUE;
 	if (ui->countdown_source) {
 		g_source_remove (ui->countdown_source);
@@ -134,16 +219,8 @@ finish_reminder (ReminderUi *ui, gboolean dismiss)
 	}
 	if (active_reminders && ui->dedupe_key)
 		g_hash_table_remove (active_reminders, ui->dedupe_key);
-	if (watch_current_ui == ui)
-		watch_current_ui = NULL;
-	if (dismiss && !ui->fallback && !ui->local && !e_reminder_watcher_dismiss_sync (watcher, ui->reminder, NULL, &error)) {
-		g_warning ("Could not dismiss calendar reminder: %s", error ? error->message : "unknown error");
-		g_clear_error (&error);
-	}
-	if (ui->fallback && dismiss)
-		g_hash_table_add (fallback_dismissed, g_strdup (ui->dedupe_key));
-	gboolean local = ui->local;
-	gtk_window_destroy (ui->window);
+	if (watch_mode) clear_watch_views ();
+	else gtk_window_destroy (ui->window);
 	if (local && !watch_mode) g_application_quit (G_APPLICATION (application));
 }
 
@@ -152,8 +229,16 @@ on_close_request (GtkWindow *window, gpointer user_data)
 {
 	ReminderUi *ui = user_data;
 	(void) window;
-	finish_reminder (ui, TRUE);
-	return FALSE;
+	gtk_label_set_text (ui->status, "Use Dismiss or a Snooze button to resolve this reminder.");
+	return TRUE;
+}
+
+static void
+on_surface_click (GtkGestureClick *gesture, gint n_press, gdouble x, gdouble y, gpointer user_data)
+{
+	GtkWidget *outer = user_data;
+	(void) gesture; (void) n_press; (void) x; (void) y;
+	gtk_widget_grab_focus (outer);
 }
 
 static void
@@ -161,43 +246,18 @@ on_dismiss_clicked (GtkButton *button, gpointer user_data)
 {
 	(void) button;
 	g_message ("Calendar reminder button: Dismiss");
-	finish_reminder (user_data, TRUE);
+	local_action (user_data, "dismiss", "");
 }
 
 static void
-on_snooze_one_clicked (GtkButton *button, gpointer user_data)
+on_snooze_choice_clicked (GtkButton *button, gpointer user_data)
 {
 	ReminderUi *ui = user_data;
-	(void) button;
-	g_message ("Calendar reminder button: Snooze 1 minute");
-	if (ui->local) { if (!local_action (ui, "snooze", "1")) return; }
-	else if (ui->fallback) {
-		FallbackAlarm *alarm = g_new0 (FallbackAlarm, 1);
-		alarm->reminder = e_reminder_data_copy (ui->reminder);
-		alarm->key = g_strdup (ui->dedupe_key);
-		alarm->event_start = ui->event_start;
-		alarm->source_id = g_timeout_add_seconds_full (G_PRIORITY_DEFAULT, 60, fallback_timeout_cb, alarm, fallback_alarm_free);
-		g_hash_table_replace (fallback_scheduled, g_strdup (ui->dedupe_key), alarm);
-	} else if (!ui->local) e_reminder_watcher_snooze (watcher, ui->reminder, time (NULL) + 60);
-	finish_reminder (ui, FALSE);
-}
-
-static void
-on_snooze_five_clicked (GtkButton *button, gpointer user_data)
-{
-	ReminderUi *ui = user_data;
-	(void) button;
-	g_message ("Calendar reminder button: Snooze 5 minutes");
-	if (ui->local) { if (!local_action (ui, "snooze", "5")) return; }
-	else if (ui->fallback) {
-		FallbackAlarm *alarm = g_new0 (FallbackAlarm, 1);
-		alarm->reminder = e_reminder_data_copy (ui->reminder);
-		alarm->key = g_strdup (ui->dedupe_key);
-		alarm->event_start = ui->event_start;
-		alarm->source_id = g_timeout_add_seconds_full (G_PRIORITY_DEFAULT, 5 * 60, fallback_timeout_cb, alarm, fallback_alarm_free);
-		g_hash_table_replace (fallback_scheduled, g_strdup (ui->dedupe_key), alarm);
-	} else if (!ui->local) e_reminder_watcher_snooze (watcher, ui->reminder, time (NULL) + 5 * 60);
-	finish_reminder (ui, FALSE);
+	gint minutes = GPOINTER_TO_INT (g_object_get_data (G_OBJECT (button), "snooze-minutes"));
+	gchar *payload = g_strdup_printf ("%d", minutes);
+	g_message ("Calendar reminder button: Snooze %d minutes", minutes);
+	local_action (ui, "snooze", payload);
+	g_free (payload);
 }
 
 static void
@@ -208,21 +268,9 @@ on_snooze_until_start_clicked (GtkButton *button, gpointer user_data)
 	if (ui->event_start <= time (NULL))
 		return;
 	g_message ("Calendar reminder button: Snooze until event starts");
-	if (ui->local) {
-		gchar *timestamp = g_strdup_printf ("%" G_GINT64_FORMAT, ui->event_start);
-		gboolean accepted = local_action (ui, "snooze-until", timestamp);
-		g_free (timestamp);
-		if (!accepted) return;
-	}
-	else if (ui->fallback) {
-		FallbackAlarm *alarm = g_new0 (FallbackAlarm, 1);
-		alarm->reminder = e_reminder_data_copy (ui->reminder);
-		alarm->key = g_strdup (ui->dedupe_key);
-		alarm->event_start = ui->event_start;
-		alarm->source_id = g_timeout_add_seconds_full (G_PRIORITY_DEFAULT, (guint) (ui->event_start - time (NULL)), fallback_timeout_cb, alarm, fallback_alarm_free);
-		g_hash_table_replace (fallback_scheduled, g_strdup (ui->dedupe_key), alarm);
-	} else if (!ui->local) e_reminder_watcher_snooze (watcher, ui->reminder, ui->event_start);
-	finish_reminder (ui, FALSE);
+	gchar *timestamp = g_strdup_printf ("%" G_GINT64_FORMAT, ui->event_start);
+	local_action (ui, "snooze-until", timestamp);
+	g_free (timestamp);
 }
 
 static gboolean
@@ -233,37 +281,28 @@ update_countdown (gpointer user_data)
 	gchar *text;
 	if (ui->finished)
 		return G_SOURCE_REMOVE;
-	if (remaining > 0) {
+	if (ui->event_start <= 0) {
+		text = g_strdup ("No event start time is available");
+	} else if (remaining > 0) {
 		text = g_strdup_printf ("Starts in %02" G_GINT64_FORMAT ":%02" G_GINT64_FORMAT,
 			remaining / 60, remaining % 60);
 	} else {
-		text = ui->local ? g_strdup ("Reminder is active") : g_strdup ("Event is starting now");
+		text = ui->local ? g_strdup ("Event has already started") : g_strdup ("Event has already started");
 	}
 	gtk_label_set_text (ui->countdown, text);
+	if (ui->until_button) gtk_widget_set_sensitive (ui->until_button, ui->event_start > time (NULL));
 	g_free (text);
 	return G_SOURCE_CONTINUE;
 }
 
-static gint64
-get_event_start (ECalComponent *component)
+static void
+monitor_list_changed (GListModel *model, guint position, guint removed, guint added, gpointer user_data)
 {
-	ECalComponentDateTime *dt = e_cal_component_get_dtstart (component);
-	ICalTime *value;
-	ICalTimezone *zone = NULL;
-	const gchar *tzid;
-	time_t result;
-	if (!dt)
-		return 0;
-	value = e_cal_component_datetime_get_value (dt);
-	tzid = e_cal_component_datetime_get_tzid (dt);
-	if (tzid && *tzid)
-		zone = i_cal_timezone_get_builtin_timezone_from_tzid (tzid);
-	if (value)
-		result = zone ? i_cal_time_as_timet_with_zone (value, zone) : i_cal_time_as_timet (value);
-	else
-		result = 0;
-	e_cal_component_datetime_free (dt);
-	return result;
+	(void) model; (void) position; (void) removed; (void) added; (void) user_data;
+	if (watch_current_ui) {
+		policy_changed = TRUE;
+		refresh_watch (NULL);
+	}
 }
 
 static void
@@ -272,119 +311,59 @@ on_open_meeting_clicked (GtkButton *button, gpointer user_data)
 	ReminderUi *ui = user_data;
 	GError *error = NULL;
 	(void) button;
-	if (!ui->meeting_url || !g_uri_is_valid (ui->meeting_url, G_URI_FLAGS_NONE, NULL))
+	if (watch_action_pending || ui->pending_action || ui->finished || !ui->meeting_url || !g_uri_is_valid (ui->meeting_url, G_URI_FLAGS_NONE, NULL))
 		return;
+	ui->pending_action = TRUE;
+	watch_action_pending = TRUE;
+	for (guint i = 0; watch_views && i < watch_views->len; i++) {
+		GtkWindow *window = g_ptr_array_index (watch_views, i);
+		ReminderUi *copy = g_object_get_data (G_OBJECT (window), "reminder-ui");
+		if (copy) copy->pending_action = TRUE;
+	}
+	gtk_label_set_text (ui->status, "Opening meeting link…");
 	g_message ("Calendar reminder button: Open meeting");
 	if (ui->local) local_stop_audio ();
 	if (!g_app_info_launch_default_for_uri (ui->meeting_url, NULL, &error)) {
 		g_warning ("Could not open meeting link: %s", error ? error->message : "unknown error");
+		gtk_label_set_text (ui->status, "Could not open the meeting link. Retry Open or choose another action.");
+		ui->pending_action = FALSE;
+		watch_action_pending = FALSE;
+		for (guint i = 0; watch_views && i < watch_views->len; i++) {
+			GtkWindow *window = g_ptr_array_index (watch_views, i);
+			ReminderUi *copy = g_object_get_data (G_OBJECT (window), "reminder-ui");
+			if (copy) copy->pending_action = FALSE;
+		}
 		g_clear_error (&error);
 		return;
 	}
-	if (ui->local) {
-		if (!local_action (ui, "open", "launched")) return;
-		finish_reminder (ui, FALSE);
-	} else finish_reminder (ui, TRUE);
-}
-
-static gchar *
-find_meeting_url (ECalComponent *component)
-{
-	gchar *url = NULL;
-	gchar *calendar_url = e_cal_component_get_url (component);
-	gchar *ical = NULL;
-	GString *searchable;
-	GRegex *regex;
-	GMatchInfo *match = NULL;
-	const gchar *patterns[] = {
-		"(?im)^X-GOOGLE-CONFERENCE:(https?://[^\\r\\n]+)",
-		"(?im)^X-MICROSOFT-CDO-ONLINE-MEETINGURL:(https?://[^\\r\\n]+)",
-		"(?i)(https?://(?:[a-z0-9-]+\\.)*(?:zoom\\.us|zoomgov\\.com|meet\\.google\\.com|teams\\.microsoft\\.com|teams\\.live\\.com|webex\\.com|whereby\\.com|bluejeans\\.com|gotomeeting\\.com|gotowebinar\\.com|join\\.skype\\.com|skype\\.com|ringcentral\\.com|chime\\.aws|discord\\.gg)[^\\s<>\\\"\\r\\n\\\\]+)",
-		"(?im)^URL:(https?://[^\\r\\n]+)"
-	};
-	guint i;
-
-	ical = e_cal_component_get_as_string (component);
-	if (!ical) {
-		url = calendar_url;
-		goto validate_url;
-	}
-	searchable = g_string_new (ical);
-	{
-		GSList *descriptions = e_cal_component_get_descriptions (component);
-		GSList *link;
-		for (link = descriptions; link; link = link->next) {
-			const gchar *description = e_cal_component_text_get_value (link->data);
-			if (description && *description) {
-				g_string_append_c (searchable, '\n');
-				g_string_append (searchable, description);
-			}
-		}
-		g_slist_free_full (descriptions, (GDestroyNotify) e_cal_component_text_free);
-	}
-	/* Match link href values as well as plain text links in HTML descriptions. */
-	for (i = 0; i < G_N_ELEMENTS (patterns); i++) {
-		regex = g_regex_new (patterns[i], G_REGEX_OPTIMIZE, 0, NULL);
-		if (regex && g_regex_match (regex, searchable->str, 0, &match)) {
-			url = g_match_info_fetch (match, 1);
-			g_match_info_free (match);
-			g_regex_unref (regex);
-			break;
-		}
-		if (match) {
-			g_match_info_free (match);
-			match = NULL;
-		}
-		if (regex)
-			g_regex_unref (regex);
-	}
-	g_string_free (searchable, TRUE);
-	g_free (ical);
-	if (url)
-		g_free (calendar_url);
-	else
-		url = calendar_url;
-	if (url)
-		goto validate_url;
-	return url;
-
-validate_url:
-	if (!url)
-		return NULL;
-	g_strstrip (url);
-	while (*url && strchr (".,;:)]}", url[strlen (url) - 1]))
-		url[strlen (url) - 1] = '\0';
-	if (!g_uri_is_valid (url, G_URI_FLAGS_NONE, NULL)) {
-		g_clear_pointer (&url, g_free);
-		return NULL;
-	}
-	{
-		gchar *scheme = g_uri_parse_scheme (url);
-		gboolean http = scheme && (g_ascii_strcasecmp (scheme, "http") == 0 ||
-			g_ascii_strcasecmp (scheme, "https") == 0);
-		g_free (scheme);
-		if (!http)
-			g_clear_pointer (&url, g_free);
-	}
-	return url;
+	ui->pending_action = FALSE;
+	watch_action_pending = FALSE;
+	local_action (ui, "open", "launched");
 }
 
 static void
 show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
-	      const gchar *dedupe_key, gint64 event_start, EReminderData *reminder,
-	      gboolean fallback, gboolean local, guint64 revision)
+	      const gchar *dedupe_key, gint64 event_start, const gchar *source_id,
+	      const gchar *calendar_id, gboolean local, guint64 revision,
+	      GdkMonitor *monitor, gboolean copy)
 {
-	GtkWidget *outer, *content, *title, *details, *status, *primary_buttons, *snooze_buttons, *button;
+	GtkWidget *outer, *center, *content, *title, *details, *details_scroll, *status, *message, *primary_buttons, *snooze_buttons, *button;
 	ReminderUi *ui;
 	ui = g_new0 (ReminderUi, 1);
-	ui->reminder = reminder ? e_reminder_data_copy (reminder) : NULL;
-	ui->fallback = fallback;
+	ui->generation = ui_generation;
 	ui->local = local;
 	ui->local_revision = revision;
 	ui->meeting_url = meeting_url;
 	ui->event_start = event_start;
 	ui->dedupe_key = g_strdup (dedupe_key);
+	ui->source_id = g_strdup (source_id ? source_id : "");
+	ui->calendar_id = g_strdup (calendar_id ? calendar_id : "");
 	ui->window = GTK_WINDOW (gtk_application_window_new (application));
+	if (watch_mode) {
+		if (!watch_views) watch_views = g_ptr_array_new_with_free_func (g_object_unref);
+		g_ptr_array_add (watch_views, g_object_ref (ui->window));
+		if (!copy) watch_current_ui = ui;
+	}
 	if (layer_shell_supported) {
 		/* A compositor overlay surface stays above normal and fullscreen app windows. */
 		gtk_layer_init_for_window (ui->window);
@@ -395,27 +374,47 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 		gtk_layer_set_anchor (ui->window, GTK_LAYER_SHELL_EDGE_LEFT, TRUE);
 		gtk_layer_set_anchor (ui->window, GTK_LAYER_SHELL_EDGE_RIGHT, TRUE);
 		gtk_layer_set_exclusive_zone (ui->window, -1);
-		gtk_layer_set_keyboard_mode (ui->window, GTK_LAYER_SHELL_KEYBOARD_MODE_EXCLUSIVE);
+		gtk_layer_set_keyboard_mode (ui->window, GTK_LAYER_SHELL_KEYBOARD_MODE_ON_DEMAND);
+		if (monitor) gtk_layer_set_monitor (ui->window, monitor);
 	}
 	g_object_set_data_full (G_OBJECT (ui->window), "reminder-ui", ui, reminder_ui_free);
 	gtk_window_set_title (ui->window, summary && *summary ? summary : "Calendar reminder");
 	gtk_window_set_decorated (ui->window, FALSE);
-	gtk_window_set_resizable (ui->window, FALSE);
-	gtk_window_set_default_size (ui->window, 1240, 700);
+	gtk_window_set_resizable (ui->window, TRUE);
 	g_signal_connect (ui->window, "close-request", G_CALLBACK (on_close_request), ui);
 
 	outer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 28);
 	gtk_widget_add_css_class (outer, "reminder-overlay");
-	gtk_widget_set_margin_top (outer, 64);
-	gtk_widget_set_margin_bottom (outer, 52);
-	gtk_widget_set_margin_start (outer, 80);
-	gtk_widget_set_margin_end (outer, 80);
+	gtk_widget_set_hexpand (outer, TRUE);
+	gtk_widget_set_vexpand (outer, TRUE);
+	gtk_widget_set_halign (outer, GTK_ALIGN_FILL);
+	gtk_widget_set_valign (outer, GTK_ALIGN_FILL);
+	gtk_widget_set_focusable (outer, TRUE);
+	GtkGesture *surface_click = gtk_gesture_click_new ();
+	g_signal_connect (surface_click, "pressed", G_CALLBACK (on_surface_click), outer);
+	gtk_widget_add_controller (outer, GTK_EVENT_CONTROLLER (surface_click));
+	center = gtk_box_new (GTK_ORIENTATION_VERTICAL, 28);
+	gtk_widget_set_hexpand (center, TRUE);
+	gtk_widget_set_vexpand (center, TRUE);
+	gtk_widget_set_halign (center, GTK_ALIGN_CENTER);
+	gtk_widget_set_valign (center, GTK_ALIGN_CENTER);
+	gtk_widget_set_margin_top (center, 32);
+	gtk_widget_set_margin_bottom (center, 32);
+	gtk_widget_set_margin_start (center, 32);
+	gtk_widget_set_margin_end (center, 32);
 
 	content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 20);
+	gtk_widget_add_css_class (content, "reminder-content");
+	gtk_widget_set_size_request (content, 0, -1);
+	gtk_widget_set_size_request (center, 0, -1);
+	gtk_widget_set_hexpand (content, TRUE);
+	gtk_widget_set_halign (content, GTK_ALIGN_CENTER);
+	gtk_widget_set_valign (content, GTK_ALIGN_CENTER);
 	title = gtk_label_new (summary && *summary ? summary : "Calendar reminder");
 	gtk_widget_add_css_class (title, "reminder-title");
 	gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (title), TRUE);
+	gtk_label_set_max_width_chars (GTK_LABEL (title), 64);
 	gtk_box_append (GTK_BOX (content), title);
 
 	details = gtk_label_new (body && *body ? body : "An event reminder is due.");
@@ -423,322 +422,309 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_label_set_xalign (GTK_LABEL (details), 0.0f);
 	gtk_label_set_yalign (GTK_LABEL (details), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (details), TRUE);
-	gtk_box_append (GTK_BOX (content), details);
+	gtk_label_set_max_width_chars (GTK_LABEL (details), 100);
+	details_scroll = gtk_scrolled_window_new ();
+	gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (details_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_max_content_height (GTK_SCROLLED_WINDOW (details_scroll), 320);
+	gtk_scrolled_window_set_max_content_width (GTK_SCROLLED_WINDOW (details_scroll), 1400);
+	gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (details_scroll), TRUE);
+	gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (details_scroll), details);
+	gtk_box_append (GTK_BOX (content), details_scroll);
 
 	status = gtk_label_new (NULL);
 	ui->countdown = GTK_LABEL (status);
 	gtk_widget_add_css_class (status, "reminder-status");
 	gtk_label_set_xalign (GTK_LABEL (status), 0.0f);
 	gtk_box_append (GTK_BOX (content), status);
-	gtk_widget_set_vexpand (content, TRUE);
-	gtk_box_append (GTK_BOX (outer), content);
+	message = gtk_label_new (ui->meeting_url ? "" : "No meeting link is available for this reminder.");
+	ui->status = GTK_LABEL (message);
+	gtk_widget_add_css_class (message, "reminder-status");
+	gtk_label_set_xalign (GTK_LABEL (message), 0.0f);
+	gtk_label_set_wrap (GTK_LABEL (message), TRUE);
+	gtk_box_append (GTK_BOX (content), message);
+	GtkWidget *keyboard_hint = gtk_label_new ("Click the background to focus the reminder, then press Tab to move between buttons.");
+	gtk_widget_add_css_class (keyboard_hint, "reminder-hint");
+	gtk_label_set_xalign (GTK_LABEL (keyboard_hint), 0.0f);
+	gtk_label_set_wrap (GTK_LABEL (keyboard_hint), TRUE);
+	gtk_box_append (GTK_BOX (content), keyboard_hint);
+	gtk_box_append (GTK_BOX (center), content);
 
-	primary_buttons = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 22);
-	gtk_box_set_homogeneous (GTK_BOX (primary_buttons), TRUE);
+	primary_buttons = gtk_flow_box_new ();
+	gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (primary_buttons), GTK_SELECTION_NONE);
+	gtk_flow_box_set_homogeneous (GTK_FLOW_BOX (primary_buttons), TRUE);
+	gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (primary_buttons), 4);
+	gtk_flow_box_set_column_spacing (GTK_FLOW_BOX (primary_buttons), 18);
+	gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (primary_buttons), 18);
+	GtkWidget *primary_heading = gtk_label_new ("Meeting actions");
+	gtk_widget_add_css_class (primary_heading, "reminder-group-heading");
+	gtk_label_set_xalign (GTK_LABEL (primary_heading), 0.0f);
+	gtk_box_append (GTK_BOX (center), primary_heading);
 	button = gtk_button_new_with_label ("Open meeting");
 	gtk_widget_add_css_class (button, "reminder-action");
+	gtk_widget_add_css_class (button, "reminder-primary");
 	gtk_widget_set_sensitive (button, ui->meeting_url && g_uri_is_valid (ui->meeting_url, G_URI_FLAGS_NONE, NULL));
 	g_signal_connect (button, "clicked", G_CALLBACK (on_open_meeting_clicked), ui);
-	gtk_box_append (GTK_BOX (primary_buttons), button);
+	gtk_flow_box_insert (GTK_FLOW_BOX (primary_buttons), button, -1);
 	button = gtk_button_new_with_label ("Dismiss");
 	gtk_widget_add_css_class (button, "reminder-action");
+	gtk_widget_add_css_class (button, "reminder-secondary");
 	g_signal_connect (button, "clicked", G_CALLBACK (on_dismiss_clicked), ui);
-	gtk_box_append (GTK_BOX (primary_buttons), button);
-	gtk_box_append (GTK_BOX (outer), primary_buttons);
+	gtk_flow_box_insert (GTK_FLOW_BOX (primary_buttons), button, -1);
+	gtk_box_append (GTK_BOX (center), primary_buttons);
 
-	snooze_buttons = gtk_box_new (GTK_ORIENTATION_HORIZONTAL, 22);
-	gtk_box_set_homogeneous (GTK_BOX (snooze_buttons), TRUE);
-	button = gtk_button_new_with_label ("Snooze 1 min");
+	snooze_buttons = gtk_flow_box_new ();
+	gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (snooze_buttons), GTK_SELECTION_NONE);
+	gtk_flow_box_set_homogeneous (GTK_FLOW_BOX (snooze_buttons), TRUE);
+	gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (snooze_buttons), 5);
+	gtk_flow_box_set_column_spacing (GTK_FLOW_BOX (snooze_buttons), 18);
+	gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (snooze_buttons), 18);
+	GtkWidget *snooze_heading = gtk_label_new ("Snooze choices");
+	gtk_widget_add_css_class (snooze_heading, "reminder-group-heading");
+	gtk_label_set_xalign (GTK_LABEL (snooze_heading), 0.0f);
+	gtk_box_append (GTK_BOX (center), snooze_heading);
+	for (guint i = 0; active_snooze_minutes && i < active_snooze_minutes->len; i++) {
+		guint minutes = g_array_index (active_snooze_minutes, guint, i);
+		gchar *label = g_strdup_printf ("Snooze %u min", minutes);
+		button = gtk_button_new_with_label (label);
+		g_free (label);
+		g_object_set_data (G_OBJECT (button), "snooze-minutes", GINT_TO_POINTER ((gint) minutes));
+		gtk_widget_add_css_class (button, "reminder-action");
+		gtk_widget_add_css_class (button, "reminder-snooze");
+		g_signal_connect (button, "clicked", G_CALLBACK (on_snooze_choice_clicked), ui);
+		gtk_flow_box_insert (GTK_FLOW_BOX (snooze_buttons), button, -1);
+	}
+	button = gtk_button_new_with_label ("Until event starts");
 	gtk_widget_add_css_class (button, "reminder-action");
-	g_signal_connect (button, "clicked", G_CALLBACK (on_snooze_one_clicked), ui);
-	gtk_box_append (GTK_BOX (snooze_buttons), button);
-	button = gtk_button_new_with_label ("Snooze 5 min");
-	gtk_widget_add_css_class (button, "reminder-action");
-	g_signal_connect (button, "clicked", G_CALLBACK (on_snooze_five_clicked), ui);
-	gtk_box_append (GTK_BOX (snooze_buttons), button);
-	button = gtk_button_new_with_label ("Until start");
-	gtk_widget_add_css_class (button, "reminder-action");
+	gtk_widget_add_css_class (button, "reminder-snooze");
+	ui->until_button = button;
 	gtk_widget_set_sensitive (button, ui->event_start > time (NULL));
+	if (ui->event_start <= 0)
+		gtk_label_set_text (ui->status, ui->meeting_url ? "Until event starts is unavailable because no start time is available." : "No meeting link or event start time is available.");
+	else if (ui->event_start <= time (NULL))
+		gtk_label_set_text (ui->status, ui->meeting_url ? "Until event starts is unavailable because the event has already started." : "No meeting link is available; the event has already started.");
 	g_signal_connect (button, "clicked", G_CALLBACK (on_snooze_until_start_clicked), ui);
-	gtk_box_append (GTK_BOX (snooze_buttons), button);
-	gtk_box_append (GTK_BOX (outer), snooze_buttons);
+	gtk_flow_box_insert (GTK_FLOW_BOX (snooze_buttons), button, -1);
+	gtk_box_append (GTK_BOX (center), snooze_buttons);
 
 	gtk_window_set_child (ui->window, outer);
+	gtk_box_append (GTK_BOX (outer), center);
 	update_countdown (ui);
 	ui->countdown_source = g_timeout_add_seconds (1, update_countdown, ui);
 	gtk_window_present (ui->window);
-	if (local && watch_mode) watch_current_ui = ui;
-	if (!layer_shell_supported)
-		gtk_window_fullscreen (ui->window);
+	gtk_widget_grab_focus (outer);
+	if (local && watch_mode && !copy) watch_current_ui = ui;
+	if (!layer_shell_supported) {
+		if (monitor) gtk_window_fullscreen_on_monitor (ui->window, monitor);
+		else gtk_window_fullscreen (ui->window);
+	}
 	g_message ("Calendar reminder shown with buttons; meeting URL: %s", ui->meeting_url ? "yes" : "no");
+	if (watch_mode && !copy) {
+		GdkDisplay *display = gdk_display_get_default ();
+		GListModel *monitors = gdk_display_get_monitors (display);
+		GdkMonitor *primary = preferred_monitor (display);
+		for (guint i = 0; i < g_list_model_get_n_items (monitors); i++) {
+			GdkMonitor *target = g_list_model_get_item (monitors, i);
+			const gchar *connector = gdk_monitor_get_connector (target);
+			gboolean include = g_strcmp0 (outputs_mode ? outputs_mode : "all", "all") == 0 ||
+			(g_strcmp0 (outputs_mode ? outputs_mode : "all", "first") == 0 && target == primary) ||
+				(g_str_has_prefix (outputs_mode ? outputs_mode : "", "connector:") && g_strcmp0 (connector, outputs_mode + strlen ("connector:")) == 0);
+			if (include && target != primary)
+				show_overlay (summary, body, g_strdup (ui->meeting_url), dedupe_key, event_start, source_id, calendar_id, local, revision, target, TRUE);
+			g_object_unref (target);
+		}
+		g_clear_object (&primary);
+	}
 }
 
 static void
-show_reminder_full (EReminderData *reminder, gboolean fallback)
+watch_set_foreground (const gchar *id)
 {
-	ECalComponent *component = e_reminder_data_get_component (reminder);
-	const ECalComponentText *summary_text;
-	const gchar *summary;
-	gchar *body, *key, *url;
-	gint64 event_start;
-	if (!component) return;
-	summary_text = e_cal_component_get_summary (component);
-	summary = summary_text ? e_cal_component_text_get_value (summary_text) : NULL;
-	event_start = get_event_start (component);
-	key = g_strdup_printf ("%s@%" G_GINT64_FORMAT,
-		e_cal_component_get_uid (component) ? e_cal_component_get_uid (component) : (summary ? summary : "event"), event_start);
-	if (g_hash_table_contains (active_reminders, key)) { g_free (key); return; }
-	g_hash_table_add (active_reminders, g_strdup (key));
-	body = fallback ? g_strdup ("Your calendar event starts soon.") : e_reminder_watcher_describe_data (watcher, reminder, E_REMINDER_WATCHER_DESCRIBE_FLAG_NONE);
-	url = find_meeting_url (component);
-	show_overlay (summary, body, url, key, event_start, reminder, fallback, FALSE, 0);
-	g_free (body); g_free (key);
+	if (!core_connection) return;
+	g_dbus_connection_call (core_connection, "org.muness.CalendarReminderOverlay.Core",
+		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "SetForeground",
+		g_variant_new ("(s)", id ? id : ""), NULL, G_DBUS_CALL_FLAGS_NONE, -1, NULL, NULL, NULL);
 }
 
-static gboolean
-show_synthetic_alert (void)
+static void
+render_list_snapshot (const gchar *json)
 {
 	GError *error = NULL;
-	GDBusConnection *connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
-	GVariant *result;
-	const gchar *title, *body, *url, *state;
-	guint64 revision;
-	gint64 event_start;
-	if (!connection) { g_warning ("Synthetic mode needs the local alert core: %s", error->message); g_clear_error (&error); return FALSE; }
-	result = g_dbus_connection_call_sync (connection, "org.muness.CalendarReminderOverlay.Core",
-		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "Get",
-		g_variant_new ("(s)", synthetic_alert_id), G_VARIANT_TYPE ("(sssstt)"), G_DBUS_CALL_FLAGS_NONE, 3000, NULL, &error);
-	if (!result) { g_warning ("Synthetic alert unavailable: %s", error->message); g_clear_error (&error); g_object_unref (connection); return FALSE; }
-	g_variant_get (result, "(&s&s&s&stt)", &title, &body, &url, &state, &revision, &event_start);
-	if (!g_hash_table_contains (active_reminders, synthetic_alert_id)) {
-		g_hash_table_add (active_reminders, g_strdup (synthetic_alert_id));
-		show_overlay (title, body, *url ? g_strdup (url) : NULL, synthetic_alert_id, event_start, NULL, FALSE, TRUE, revision);
+	JsonParser *parser = json_parser_new ();
+	JsonArray *items;
+	JsonObject *selected = NULL;
+	if (!json_parser_load_from_data (parser, json, -1, &error)) {
+		g_debug ("Alert watch received invalid core state: %s", error ? error->message : "invalid JSON");
+		g_clear_error (&error);
+		g_object_unref (parser);
+		return;
 	}
-	g_variant_unref (result); g_object_unref (connection); (void) state; return TRUE;
+	if (watch_action_pending) { g_object_unref (parser); return; }
+	layer_shell_supported = g_strcmp0 (display_backend, "native") == 0 && gtk_layer_is_supported ();
+	items = json_node_get_array (json_parser_get_root (parser));
+	for (guint i = 0; i < json_array_get_length (items); i++) {
+		JsonObject *item = json_array_get_object_element (items, i);
+		if (g_strcmp0 (json_object_get_string_member (item, "state"), "active") != 0) continue;
+		if (synthetic_alert_id) {
+			if (g_strcmp0 (synthetic_alert_id, json_object_get_string_member (item, "id")) == 0) { selected = item; break; }
+			continue;
+		}
+		if (watch_current_ui && g_strcmp0 (watch_current_ui->dedupe_key, json_object_get_string_member (item, "id")) == 0) { selected = item; break; }
+		if (!selected) selected = item;
+	}
+	if (policy_changed) {
+		policy_changed = FALSE;
+		clear_watch_views ();
+	}
+	if (!selected) {
+		watch_set_foreground ("");
+		if (watch_current_ui) { g_hash_table_remove (active_reminders, watch_current_ui->dedupe_key); clear_watch_views (); }
+		g_object_unref (parser);
+		return;
+	}
+	const gchar *id = json_object_get_string_member (selected, "id");
+	const gchar *source_id = json_object_get_string_member (selected, "source_id");
+	const gchar *calendar_id = json_object_get_string_member (selected, "calendar_id");
+	guint64 revision = (guint64) json_object_get_int_member (selected, "revision");
+	if (watch_current_ui && (g_strcmp0 (watch_current_ui->dedupe_key, id) != 0 || watch_current_ui->local_revision != revision)) {
+		g_hash_table_remove (active_reminders, watch_current_ui->dedupe_key);
+		clear_watch_views ();
+	}
+	if (!watch_current_ui) {
+		const gchar *title = json_object_get_string_member (selected, "title");
+		const gchar *body = json_object_get_string_member (selected, "body");
+		const gchar *url = json_object_get_string_member (selected, "destination");
+		gint64 event_start = json_object_get_int_member (selected, "event_start");
+		JsonObject *overrides = json_object_get_object_member (json_node_get_object (current_policy), "calendar_overrides");
+		JsonArray *defaults = json_object_get_array_member (json_object_get_object_member (json_node_get_object (current_policy), "snooze"), "minutes");
+		g_clear_pointer (&active_snooze_minutes, g_array_unref);
+		active_snooze_minutes = g_array_new (FALSE, FALSE, sizeof (guint));
+		for (guint i = 0; defaults && i < json_array_get_length (defaults); i++) { guint value = (guint) json_array_get_int_element (defaults, i); g_array_append_val (active_snooze_minutes, value); }
+		gchar *key = g_strdup_printf ("%s/%s", source_id, calendar_id);
+		JsonObject *override = overrides ? json_object_get_object_member (overrides, key) : NULL;
+		JsonArray *custom = override ? json_object_get_array_member (override, "snooze_minutes") : NULL;
+		if (custom) { g_clear_pointer (&active_snooze_minutes, g_array_unref); active_snooze_minutes = g_array_new (FALSE, FALSE, sizeof (guint)); for (guint i = 0; i < json_array_get_length (custom); i++) { guint value = (guint) json_array_get_int_element (custom, i); g_array_append_val (active_snooze_minutes, value); } }
+		g_hash_table_add (active_reminders, g_strdup (id));
+		GdkMonitor *monitor = preferred_monitor (gdk_display_get_default ());
+		if (monitor)
+			show_overlay (title, body, *url ? g_strdup (url) : NULL, id, event_start, source_id, calendar_id, TRUE, revision, monitor, FALSE);
+		else {
+			watch_set_foreground ("");
+			g_warning ("Configured output %s is unavailable; reminder remains active in core", outputs_mode ? outputs_mode : "all");
+		}
+		g_clear_object (&monitor);
+		g_free (key);
+	}
+	if (watch_current_ui)
+		watch_set_foreground (id);
+	g_object_unref (parser);
+}
+
+static void
+watch_list_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	GError *error = NULL;
+	GVariant *response = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source), result, &error);
+	watch_refreshing = FALSE;
+	if (!response) {
+		g_debug ("Alert watch refresh failed: %s", error ? error->message : "unknown error");
+		g_clear_error (&error);
+		return;
+	}
+	const gchar *json;
+	g_variant_get (response, "(&s)", &json);
+	render_list_snapshot (json);
+	g_variant_unref (response);
+	(void) user_data;
+}
+
+static void
+watch_policy_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	GError *error = NULL;
+	GVariant *response = g_dbus_connection_call_finish (G_DBUS_CONNECTION (source), result, &error);
+	if (!response) {
+		watch_refreshing = FALSE;
+		g_debug ("Alert policy refresh failed: %s", error ? error->message : "unknown error");
+		g_clear_error (&error);
+		return;
+	}
+	const gchar *json;
+	g_variant_get (response, "(&s)", &json);
+	apply_policy_json (json);
+	g_variant_unref (response);
+	g_dbus_connection_call (core_connection, "org.muness.CalendarReminderOverlay.Core",
+		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "List",
+		NULL, G_VARIANT_TYPE ("(s)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, watch_list_done, NULL);
+	(void) user_data;
+}
+
+static void
+watch_bus_ready (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+	GError *error = NULL;
+	core_connection = g_bus_get_finish (result, &error);
+	if (!core_connection) {
+		watch_refreshing = FALSE;
+		g_debug ("Alert watch cannot reach core: %s", error ? error->message : "unknown error");
+		g_clear_error (&error);
+		return;
+	}
+	g_dbus_connection_call (core_connection, "org.muness.CalendarReminderOverlay.Core",
+		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "GetPolicy",
+		NULL, G_VARIANT_TYPE ("(s)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, watch_policy_done, NULL);
+	(void) source; (void) user_data;
 }
 
 static gboolean
 refresh_watch (gpointer user_data)
 {
-	GError *error = NULL;
-	GDBusConnection *connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
-	GVariant *result;
-	JsonParser *parser;
-	const gchar *next_id = NULL;
-	guint64 next_revision = 0;
 	(void) user_data;
-	if (!connection) { g_warning ("Alert watch cannot reach core: %s", error ? error->message : "unknown error"); g_clear_error (&error); return G_SOURCE_CONTINUE; }
-	result = g_dbus_connection_call_sync (connection, "org.muness.CalendarReminderOverlay.Core",
-		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "List",
-		NULL, G_VARIANT_TYPE ("(s)"), G_DBUS_CALL_FLAGS_NONE, 2000, NULL, &error);
-	g_object_unref (connection);
-	if (!result) { g_debug ("Alert watch refresh failed: %s", error ? error->message : "unknown error"); g_clear_error (&error); return G_SOURCE_CONTINUE; }
-	const gchar *json;
-	g_variant_get (result, "(&s)", &json);
-	parser = json_parser_new ();
-	if (json_parser_load_from_data (parser, json, -1, &error)) {
-		JsonArray *items = json_node_get_array (json_parser_get_root (parser));
-		for (guint i = 0; i < json_array_get_length (items); i++) {
-			JsonObject *item = json_array_get_object_element (items, i);
-			if (g_strcmp0 (json_object_get_string_member (item, "state"), "active") == 0) {
-				next_id = json_object_get_string_member (item, "id");
-				next_revision = (guint64) json_object_get_int_member (item, "revision");
-				break;
-			}
-		}
-	} else {
-		g_debug ("Alert watch received invalid core state: %s", error ? error->message : "invalid JSON");
-		g_clear_error (&error);
+	if (watch_refreshing) return G_SOURCE_CONTINUE;
+	watch_refreshing = TRUE;
+	if (!core_connection) {
+		g_bus_get (G_BUS_TYPE_SESSION, NULL, watch_bus_ready, NULL);
+		return G_SOURCE_CONTINUE;
 	}
-	if (watch_current_ui && (!next_id || g_strcmp0 (watch_current_ui->dedupe_key, next_id) != 0 || watch_current_ui->local_revision != next_revision)) {
-		ReminderUi *old = watch_current_ui;
-		watch_current_ui = NULL;
-		old->finished = TRUE;
-		if (old->countdown_source) { g_source_remove (old->countdown_source); old->countdown_source = 0; }
-		g_hash_table_remove (active_reminders, old->dedupe_key);
-		gtk_window_destroy (old->window);
-	}
-	if (next_id && !watch_current_ui) {
-		g_free (synthetic_alert_id);
-		synthetic_alert_id = g_strdup (next_id);
-		if (!show_synthetic_alert ()) g_debug ("No active alert could be rendered for %s", next_id);
-	}
-	g_object_unref (parser);
-	g_variant_unref (result);
+	g_dbus_connection_call (core_connection, "org.muness.CalendarReminderOverlay.Core",
+		"/org/muness/CalendarReminderOverlay/Core", "org.muness.CalendarReminderOverlay.Core1", "GetPolicy",
+		NULL, G_VARIANT_TYPE ("(s)"), G_DBUS_CALL_FLAGS_NONE, -1, NULL, watch_policy_done, NULL);
 	return G_SOURCE_CONTINUE;
-}
-
-static void
-show_reminder (EReminderData *reminder)
-{
-	show_reminder_full (reminder, FALSE);
-}
-
-static gchar *
-fallback_key_for (const gchar *source_uid, ECalComponent *component, gint64 event_start)
-{
-	const gchar *uid = e_cal_component_get_uid (component);
-	(void) source_uid;
-	return g_strdup_printf ("%s@%" G_GINT64_FORMAT, uid ? uid : "event", event_start);
-}
-
-static void
-schedule_fallback (const gchar *source_uid, ECalComponent *component)
-{
-	GSList *alarm_uids;
-	gint64 event_start = get_event_start (component);
-	gint64 fire_at;
-	gchar *key;
-	FallbackAlarm *alarm;
-	ECalComponentAlarmInstance *instance;
-	EReminderData *reminder;
-	if (!event_start || event_start <= time (NULL)) return;
-	alarm_uids = e_cal_component_get_alarm_uids (component);
-	if (alarm_uids) {
-		g_slist_free_full (alarm_uids, g_free);
-		return;
-	}
-	key = fallback_key_for (source_uid, component, event_start);
-	if (g_hash_table_contains (fallback_scheduled, key) ||
-	    g_hash_table_contains (fallback_dismissed, key) ||
-	    g_hash_table_contains (active_reminders, key)) {
-		g_free (key);
-		return;
-	}
-	fire_at = event_start - fallback_lead_minutes * 60;
-	if (fire_at < time (NULL)) fire_at = time (NULL) + 1;
-	instance = e_cal_component_alarm_instance_new ("COSMIC-FALLBACK", (time_t) fire_at,
-		(time_t) event_start, (time_t) event_start);
-	reminder = e_reminder_data_new (source_uid, component, instance);
-	e_cal_component_alarm_instance_free (instance);
-	if (!reminder) { g_free (key); return; }
-	alarm = g_new0 (FallbackAlarm, 1);
-	alarm->reminder = reminder;
-	alarm->event_start = event_start;
-	alarm->key = key;
-	alarm->source_id = g_timeout_add_seconds_full (G_PRIORITY_DEFAULT,
-		(guint) MAX ((gint64) 1, fire_at - time (NULL)), fallback_timeout_cb, alarm, fallback_alarm_free);
-	g_hash_table_insert (fallback_scheduled, g_strdup (key), alarm);
-}
-
-static gboolean
-scan_calendar_fallbacks (gpointer user_data)
-{
-	GList *sources, *link;
-	gchar *start_iso, *end_iso, *query;
-	time_t now = time (NULL);
-	(void) user_data;
-	g_message ("Scanning enabled calendars for fullscreen fallback reminders");
-	start_iso = g_strdup_printf ("%04d%02d%02dT%02d%02d%02dZ",
-		1900 + gmtime (&now)->tm_year, 1 + gmtime (&now)->tm_mon, gmtime (&now)->tm_mday,
-		gmtime (&now)->tm_hour, gmtime (&now)->tm_min, gmtime (&now)->tm_sec);
-	{
-		time_t later = now + 30 * 24 * 60 * 60;
-		struct tm *tm = gmtime (&later);
-		end_iso = g_strdup_printf ("%04d%02d%02dT%02d%02d%02dZ",
-			1900 + tm->tm_year, 1 + tm->tm_mon, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-	}
-	query = g_strdup_printf ("(occur-in-time-range? (make-time \"%s\") (make-time \"%s\"))", start_iso, end_iso);
-	g_free (start_iso);
-	g_free (end_iso);
-	sources = e_source_registry_list_enabled (registry, E_SOURCE_EXTENSION_CALENDAR);
-	g_message ("Found %u enabled calendar sources", g_list_length (sources));
-	for (link = sources; link; link = link->next) {
-		ESource *source = link->data;
-		const gchar *source_uid = e_source_get_uid (source);
-		ECalClient *client = g_hash_table_lookup (fallback_clients, source_uid);
-		GError *error = NULL;
-		GSList *components = NULL, *item;
-		if (!client) {
-			client = E_CAL_CLIENT (e_cal_client_connect_sync (source, E_CAL_CLIENT_SOURCE_TYPE_EVENTS, 5, NULL, &error));
-			if (!client) {
-				g_debug ("Fallback reminder could not connect to %s: %s", source_uid,
-					error ? error->message : "unknown error");
-				g_clear_error (&error);
-				continue;
-			}
-			g_hash_table_insert (fallback_clients, g_strdup (source_uid), client);
-		}
-		if (!e_cal_client_get_object_list_as_comps_sync (client, query, &components, NULL, &error)) {
-			g_debug ("Fallback reminder scan failed for %s: %s", source_uid,
-				error ? error->message : "unknown error");
-			g_clear_error (&error);
-			continue;
-		}
-		for (item = components; item; item = item->next)
-			schedule_fallback (source_uid, E_CAL_COMPONENT (item->data));
-		g_slist_free_full (components, g_object_unref);
-	}
-	g_list_free_full (sources, g_object_unref);
-	g_free (query);
-	g_message ("Calendar fallback scan complete; %u alarms scheduled", g_hash_table_size (fallback_scheduled));
-	if (fallback_poll_source)
-		g_source_remove (fallback_poll_source);
-	fallback_poll_source = g_timeout_add_seconds (60, scan_calendar_fallbacks, NULL);
-	return G_SOURCE_CONTINUE;
-}
-
-static void
-load_fallback_config (void)
-{
-	GKeyFile *keyfile = g_key_file_new ();
-	gchar *path = g_build_filename (g_get_user_config_dir (), "evolution-calendar-reminder-overlay.conf", NULL);
-	GError *error = NULL;
-	if (g_key_file_load_from_file (keyfile, path, G_KEY_FILE_NONE, &error)) {
-		gint value = g_key_file_get_integer (keyfile, "reminders", "fallback-lead-minutes", NULL);
-		if (value >= 1 && value <= 120) fallback_lead_minutes = (guint) value;
-	} else if (error && !g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT)) {
-		g_warning ("Could not read %s: %s", path, error->message);
-	}
-	g_clear_error (&error);
-	g_key_file_unref (keyfile);
-	g_free (path);
-}
-
-static void
-on_triggered (EReminderWatcher *source, const GSList *reminders, gboolean snoozed, gpointer user_data)
-{
-	const GSList *link;
-	(void) source;
-	(void) snoozed;
-	(void) user_data;
-	for (link = reminders; link; link = link->next)
-		show_reminder (link->data);
 }
 
 static void
 on_activate (GtkApplication *app, gpointer user_data)
 {
-	GError *error = NULL;
 	(void) user_data;
 	g_application_hold (G_APPLICATION (app));
 	layer_shell_supported = gtk_layer_is_supported ();
 	active_reminders = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+	monitor_model = gdk_display_get_monitors (gdk_display_get_default ());
+	g_signal_connect (monitor_model, "items-changed", G_CALLBACK (monitor_list_changed), NULL);
 	if (watch_mode) {
 		if (!watch_poll_source) watch_poll_source = g_timeout_add_seconds (1, refresh_watch, NULL);
 		refresh_watch (NULL);
 		return;
 	}
-	if (synthetic_alert_id) {
-		if (!show_synthetic_alert ()) g_application_quit (G_APPLICATION (app));
-		return;
+}
+
+static void
+print_capabilities (void)
+{
+	GdkDisplay *display = gdk_display_get_default ();
+	GListModel *monitors = gdk_display_get_monitors (display);
+	g_print ("{\"version\":1,\"renderer\":\"gtk4\",\"layer_shell_supported\":%s,\"backend\":\"%s\",\"monitors\":[",
+		gtk_layer_is_supported () ? "true" : "false", G_OBJECT_TYPE_NAME (display));
+	for (guint i = 0; i < g_list_model_get_n_items (monitors); i++) {
+		GdkMonitor *monitor = g_list_model_get_item (monitors, i);
+		GdkRectangle geometry;
+		gdk_monitor_get_geometry (monitor, &geometry);
+		if (i) g_print (",");
+		g_print ("{\"connector\":\"%s\",\"scale_factor\":%d,\"width\":%d,\"height\":%d}",
+			gdk_monitor_get_connector (monitor) ? gdk_monitor_get_connector (monitor) : "",
+			gdk_monitor_get_scale_factor (monitor), geometry.width, geometry.height);
+		g_object_unref (monitor);
 	}
-	registry = e_source_registry_new_sync (NULL, &error);
-	if (!registry) {
-		g_printerr ("source registry: %s\n", error ? error->message : "unknown error");
-		g_clear_error (&error);
-		g_application_quit (G_APPLICATION (app));
-		return;
-	}
-	watcher = e_reminder_watcher_new (registry);
-	fallback_clients = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
-	fallback_scheduled = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, fallback_alarm_free);
-	fallback_dismissed = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
-	load_fallback_config ();
-	g_signal_connect (watcher, "triggered", G_CALLBACK (on_triggered), NULL);
-	fallback_poll_source = g_timeout_add_seconds (5, scan_calendar_fallbacks, NULL);
-	g_message ("Evolution calendar reminder overlay ready (%s; fallback alert: %u minutes before events without alarms)",
-		layer_shell_supported ? "COSMIC overlay layer" : "fullscreen fallback", fallback_lead_minutes);
+	g_print ("] ,\"output_modes\":[\"all\",\"first\",\"connector:<name>\"],\"theme_modes\":[\"default\",\"dark\",\"light\"]}\n");
 }
 
 int
@@ -747,42 +733,62 @@ main (int argc, char **argv)
 	GtkCssProvider *css;
 	gint status;
 	int output_arg = 1;
+	gboolean capabilities = FALSE;
 	for (int i = 1; i < argc; i++) {
 		if (g_str_equal (argv[i], "--synthetic") && i + 1 < argc) {
 			synthetic_alert_id = g_strdup (argv[++i]);
 		} else if (g_str_equal (argv[i], "--watch")) {
 			watch_mode = TRUE;
+		} else if (g_str_equal (argv[i], "--capabilities")) {
+			capabilities = TRUE;
 		} else argv[output_arg++] = argv[i];
 	}
 	argc = output_arg;
 	argv[argc] = NULL;
-	if (!synthetic_alert_id && !watch_mode) {
+	if (!synthetic_alert_id && !watch_mode && !capabilities) {
 		g_printerr ("Select --watch for the shared core renderer or --synthetic ID for one test alert.\n");
 		return 2;
 	}
+	if (synthetic_alert_id) watch_mode = TRUE;
 	gtk_init ();
-	application = gtk_application_new (synthetic_alert_id ? NULL : "com.muness.calendar-reminder-overlay",
+	if (capabilities) {
+		GtkCssProvider *probe = gtk_css_provider_new ();
+		gtk_css_provider_load_from_string (probe,
+			".reminder-overlay { background: #151821; color: #f4f5f7; }"
+			".reminder-title { font-size: 38pt; font-weight: 700; }"
+			".reminder-details { font-size: 23pt; }"
+			".reminder-status { font-size: 20pt; color: #a9c7ff; min-height: 42px; }"
+			".reminder-hint { font-size: 15pt; opacity: 0.9; }"
+			".reminder-group-heading { font-size: 17pt; font-weight: 700; margin-top: 8px; }"
+			".reminder-action { font-size: 23pt; font-weight: 650; padding: 22px 30px; min-width: 170px; min-height: 78px; color: #f4f5f7; background: #303745; border: 2px solid #606b7d; border-radius: 8px; }"
+			".reminder-primary { background: #294e86; border-color: #8db6ff; }.reminder-secondary { background: #303745; }.reminder-snooze { background: #232a36; }"
+			".reminder-action:focus { outline: 4px solid #a9c7ff; outline-offset: 3px; }.reminder-action:hover { border-color: #a9c7ff; }.reminder-action:disabled { color: #a9b0ba; background: #303745; border-color: #606b7d; }");
+		g_object_unref (probe);
+		print_capabilities ();
+		return 0;
+	}
+	application = gtk_application_new ("com.muness.calendar-reminder-overlay",
 		synthetic_alert_id ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_DEFAULT_FLAGS);
 	g_signal_connect (application, "activate", G_CALLBACK (on_activate), NULL);
 	css = gtk_css_provider_new ();
-	gtk_css_provider_load_from_data (css,
+	application_css = g_object_ref (css);
+	gtk_css_provider_load_from_string (css,
 		".reminder-overlay { background: #151821; color: #f4f5f7; }"
 		".reminder-title { font-size: 38pt; font-weight: 700; }"
 		".reminder-details { font-size: 23pt; }"
 		".reminder-status { font-size: 20pt; color: #a9c7ff; min-height: 42px; }"
-		".reminder-action { font-size: 23pt; font-weight: 650; padding: 22px 30px; min-width: 230px; min-height: 78px; }",
-		-1);
+		".reminder-group-heading { font-size: 17pt; font-weight: 700; margin-top: 8px; }"
+		".reminder-hint { font-size: 15pt; opacity: 0.9; }"
+		".reminder-action { font-size: 23pt; font-weight: 650; padding: 22px 30px; min-width: 170px; min-height: 78px; }"
+		".reminder-action:focus { outline: 4px solid #a9c7ff; outline-offset: 3px; }");
 	gtk_style_context_add_provider_for_display (gdk_display_get_default (),
 		GTK_STYLE_PROVIDER (css), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
 	g_object_unref (css);
 	status = g_application_run (G_APPLICATION (application), argc, argv);
 	if (watch_poll_source) g_source_remove (watch_poll_source);
-	g_clear_object (&watcher);
-	g_clear_object (&registry);
-	if (fallback_poll_source) g_source_remove (fallback_poll_source);
-	g_clear_pointer (&fallback_clients, g_hash_table_unref);
-	g_clear_pointer (&fallback_scheduled, g_hash_table_unref);
-	g_clear_pointer (&fallback_dismissed, g_hash_table_unref);
+	if (monitor_model) g_signal_handlers_disconnect_by_func (monitor_model, G_CALLBACK (monitor_list_changed), NULL);
+	g_clear_object (&core_connection);
+	g_clear_object (&application_css);
 	g_clear_object (&application);
 	g_free (synthetic_alert_id);
 	return status;

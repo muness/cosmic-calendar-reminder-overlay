@@ -31,10 +31,10 @@ def load_config(path):
     try:
         config = tomllib.loads(pathlib.Path(path).read_text())
     except FileNotFoundError:
-        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0, "volume": 0.5}, "calendar": {"eds_enabled": False}}
+        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0, "volume": 0.5}, "calendar": {"eds_enabled": False}, "calendar_overrides": {}}
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ValueError(f"cannot load config {path}: {exc}") from exc
-    _keys(config, {"version", "selection", "reminders", "snooze", "display", "appearance", "audio", "calendar"}, "root")
+    _keys(config, {"version", "selection", "reminders", "snooze", "display", "appearance", "audio", "calendar", "calendar_overrides"}, "root")
     if type(config.get("version")) is not int or config["version"] != 1:
         raise ValueError("config requires version = 1")
     selection = config.get("selection", {})
@@ -56,8 +56,9 @@ def load_config(path):
         raise ValueError("[snooze].minutes must be a non-empty list of integers from 1 to 10080")
     display = config.get("display", {})
     _keys(display, {"backend", "outputs"}, "display")
-    if display.get("backend", "native") not in ("native", "fullscreen") or display.get("outputs", "all") not in ("all", "primary"):
-        raise ValueError("[display] backend must be native/fullscreen and outputs must be all/primary")
+    outputs = display.get("outputs", "all")
+    if display.get("backend", "native") not in ("native", "fullscreen") or not isinstance(outputs, str) or not outputs or (outputs not in ("all", "first") and not outputs.startswith("connector:")):
+        raise ValueError("[display] backend must be native/fullscreen and outputs must be all, first, or connector:NAME")
     appearance = config.get("appearance", {})
     _keys(appearance, {"theme"}, "appearance")
     if appearance.get("theme", "default") not in ("default", "dark", "light"):
@@ -76,6 +77,41 @@ def load_config(path):
     _keys(calendar, {"eds_enabled"}, "calendar")
     if not isinstance(calendar.get("eds_enabled", False), bool):
         raise ValueError("[calendar].eds_enabled must be boolean")
+    overrides = config.get("calendar_overrides", {})
+    if not isinstance(overrides, dict):
+        raise ValueError("[calendar_overrides] must be a table keyed by source_id/calendar_id")
+    normalized_overrides = {}
+    for key, override in overrides.items():
+        if not isinstance(key, str) or key.count("/") != 1 or not all(key.split("/")):
+            raise ValueError("calendar override keys must be source_id/calendar_id")
+        if not isinstance(override, dict):
+            raise ValueError(f"calendar override {key!r} must be a table")
+        allowed_override = {"fallback_enabled", "audio_enabled", "audio_file", "audio_volume", "audio_repeat_seconds", "snooze_minutes"}
+        _keys(override, allowed_override, f"calendar_overrides.{key}")
+        item = {}
+        if "fallback_enabled" in override:
+            if not isinstance(override["fallback_enabled"], bool): raise ValueError(f"calendar override {key!r} fallback_enabled must be boolean")
+            item["fallback_enabled"] = override["fallback_enabled"]
+        if "audio_enabled" in override:
+            if not isinstance(override["audio_enabled"], bool): raise ValueError(f"calendar override {key!r} audio_enabled must be boolean")
+            item["audio_enabled"] = override["audio_enabled"]
+        if "audio_file" in override:
+            if not isinstance(override["audio_file"], str): raise ValueError(f"calendar override {key!r} audio_file must be a path")
+            item["audio_file"] = override["audio_file"]
+        if "audio_volume" in override:
+            value = override["audio_volume"]
+            if type(value) not in (int, float) or not 0 <= value <= 1: raise ValueError(f"calendar override {key!r} audio_volume must be from 0 to 1")
+            item["audio_volume"] = value
+        if "audio_repeat_seconds" in override:
+            value = override["audio_repeat_seconds"]
+            if type(value) is not int or not 0 <= value <= 3600: raise ValueError(f"calendar override {key!r} audio_repeat_seconds must be 0 to 3600")
+            item["audio_repeat_seconds"] = value
+        if "snooze_minutes" in override:
+            value = override["snooze_minutes"]
+            if not isinstance(value, list) or not value or any(type(v) is not int or not 1 <= v <= 10080 for v in value):
+                raise ValueError(f"calendar override {key!r} snooze_minutes must be a non-empty list from 1 to 10080")
+            item["snooze_minutes"] = value
+        normalized_overrides[key] = item
     return {
         **config,
         "selection": {"mode": mode, "calendars": calendars},
@@ -85,6 +121,7 @@ def load_config(path):
         "snooze": {"minutes": minutes},
         "display": {"backend": display.get("backend", "native"), "outputs": display.get("outputs", "all")},
         "appearance": {"theme": appearance.get("theme", "default")},
+        "calendar_overrides": normalized_overrides,
     }
 
 
@@ -155,6 +192,7 @@ def main():
         p.add_argument("--show", action="store_true", help="open the alert in the existing large GTK overlay")
     p = sub.add_parser("cancel"); p.add_argument("id")
     p = sub.add_parser("status"); p.add_argument("id")
+    sub.add_parser("diagnostics", help="show calendar source freshness and errors from the running core")
     p = sub.add_parser("list")
     p = sub.add_parser("act"); p.add_argument("id"); p.add_argument("revision", type=int); p.add_argument("action", choices=["open", "dismiss", "snooze", "snooze-until"]); p.add_argument("--minutes", type=int, default=5); p.add_argument("--until", type=int, help="Unix timestamp for snooze-until")
     p = sub.add_parser("wait"); p.add_argument("id"); p.add_argument("--after-revision", type=int, default=0); p.add_argument("--timeout", type=int, default=0)
@@ -163,6 +201,7 @@ def main():
     p = sub.add_parser("config-check")
     p = sub.add_parser("calendars", help="list local EDS calendars without changing account settings")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--snippet", metavar="CALENDAR_ID", help="print a one-calendar TOML selection snippet for this calendar ID or full selection key")
     sub.add_parser("policy-json", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
@@ -174,7 +213,7 @@ def main():
     if args.command == "check-selection":
         print(json.dumps({"source_id": args.source_id, "calendar_id": args.calendar_id, "selected": selected(config, args.source_id, args.calendar_id)})); return
     if args.command == "policy-json":
-        print(json.dumps({"selection": config["selection"], "audio": config["audio"], "calendar": config["calendar"], "reminders": config.get("reminders", {"fallback_lead_minutes": 5}), "snooze": config.get("snooze", {"minutes": [1, 5]}), "display": config.get("display", {"backend": "native", "outputs": "all"}), "appearance": config.get("appearance", {"theme": "default"})})); return
+        print(json.dumps({"selection": config["selection"], "audio": config["audio"], "calendar": config["calendar"], "reminders": config["reminders"], "snooze": config["snooze"], "display": config["display"], "appearance": config["appearance"], "calendar_overrides": config["calendar_overrides"]})); return
     if args.command == "calendars":
         try:
             gi.require_version("EDataServer", "1.2")
@@ -187,13 +226,25 @@ def main():
                 parent_uid = source.get_parent()
                 parent = registry.ref_source(parent_uid) if parent_uid else None
                 extension = source.get_extension(EDataServer.SOURCE_EXTENSION_CALENDAR)
-                records.append({"source_id": "eds-local", "calendar_id": uid, "name": source.get_display_name(), "account": parent.get_display_name() if parent else "", "provider": extension.get_backend_name(), "selected": selected(config, "eds-local", uid)})
+                selection_key = f"eds-local/{uid}"
+                snippet = f'[calendar]\neds_enabled = true\n\n[selection]\nmode = "include"\ncalendars = [{json.dumps(selection_key)}]\n'
+                records.append({"source_id": "eds-local", "calendar_id": uid, "selection_key": selection_key, "name": source.get_display_name(), "account": parent.get_display_name() if parent else "", "provider": extension.get_backend_name(), "selected": selected(config, "eds-local", uid), "toml_snippet": snippet})
             records.sort(key=lambda item: (item["account"].casefold(), item["name"].casefold(), item["calendar_id"]))
+            if args.snippet:
+                match = next((item for item in records if args.snippet in (item["calendar_id"], item["selection_key"])), None)
+                if not match:
+                    raise SystemExit(f"calendar {args.snippet!r} was not found; use one of the selection keys shown by `reminderctl calendars`")
+                print(match["toml_snippet"], end="")
+                return
             if args.json:
                 print(json.dumps({"calendars": records, "error": None}, indent=2))
             else:
-                if not records: print("No EDS calendars found.")
-                for item in records: print(f"{'*' if item['selected'] else ' '} {item['name']} — {item['account'] or item['provider']} [{item['calendar_id']}]")
+                if not records:
+                    print("No EDS calendars found. Add or connect a calendar in your desktop calendar app, then run `reminderctl calendars` again.")
+                for item in records: print(f"{'*' if item['selected'] else ' '} {item['name']} — {item['account'] or item['provider']} [{item['selection_key']}]")
+                if records:
+                    print("\nTo enable one calendar, copy its full selection key above into this config snippet (or run `reminderctl calendars --snippet <selection-key>`):")
+                    print('[calendar]\neds_enabled = true\n\n[selection]\nmode = "include"\ncalendars = ["eds-local/<calendar-id>"]')
         except Exception as exc:
             message = f"EDS calendar discovery failed: {exc}"
             if args.json: print(json.dumps({"calendars": [], "error": message}, indent=2))
@@ -235,6 +286,7 @@ def main():
     if args.command == "cancel":
         print(json.dumps({"id": args.id, "cancelled": call("Cancel", "(s)", (args.id,))[0]})); return
     if args.command == "status": print(call("Status", "(s)", (args.id,))[0]); return
+    if args.command == "diagnostics": print(call("Diagnostics")[0]); return
     if args.command == "list": print(call("List")[0]); return
     if args.command == "act":
         payload = str(args.minutes) if args.action == "snooze" else ""
@@ -247,7 +299,9 @@ def main():
                 title, body, destination, state, current_revision, event_start = call("Get", "(s)", (args.id,))
                 if current_revision != args.revision or not destination:
                     raise SystemExit("Open requires the current alert revision and a destination URL")
-                Gio.AppInfo.launch_default_for_uri(destination, None)
+                call("StopAudio")
+                if not Gio.AppInfo.launch_default_for_uri(destination, None):
+                    raise SystemExit("could not open alert destination: no URI handler accepted the link")
                 payload = "launched"
             except GLib.Error as exc:
                 raise SystemExit(f"could not open alert destination: {exc.message}")

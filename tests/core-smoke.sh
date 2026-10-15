@@ -76,7 +76,7 @@ assert_state() {
 
 start_core
 /usr/bin/python3 - "$cli" "$config" <<'PY'
-import json, subprocess, sys
+import json, pathlib, subprocess, sys
 cli, config = sys.argv[1:]
 accepted = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'notify', '--json'], input=json.dumps({'id':'json:accepted','title':'JSON input','source_id':'fixture','calendar_id':'selected'}), text=True, capture_output=True)
 assert accepted.returncode == 0, accepted.stderr
@@ -87,6 +87,19 @@ from gi.repository import Gio, GLib
 connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 preview = connection.call_sync('org.muness.CalendarReminderOverlay.Core', '/org/muness/CalendarReminderOverlay/Core', 'org.muness.CalendarReminderOverlay.Core1', 'Get', GLib.Variant('(s)', ('json:accepted',)), GLib.VariantType.new('(sssstt)'), Gio.DBusCallFlags.NONE, 2000, None).unpack()
 assert preview == ('JSON input', '', '', 'active', 1, 0), preview
+diagnostics = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'diagnostics'], text=True))
+assert diagnostics == {'eds_enabled': False, 'last_scan_unix': 0, 'calendars': []}, diagnostics
+items = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'list'], text=True))
+owned = next(item for item in items if item['id'] == 'json:accepted')
+assert (owned['source_id'], owned['calendar_id'], owned['owner']) == ('fixture', 'selected', 'producer'), owned
+unselected = pathlib.Path(config).with_name('unselected.toml')
+unselected.write_text('version=1\n[selection]\nmode="include"\ncalendars=[]\n')
+withdraw = subprocess.run(['/usr/bin/python3', cli, '--config', str(unselected), 'reload'], text=True, capture_output=True)
+assert withdraw.returncode == 0 and json.loads(withdraw.stdout)['reloaded'], withdraw.stderr
+items = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'list'], text=True))
+assert next(item for item in items if item['id'] == 'json:accepted')['state'] == 'withdrawn', items
+restore = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'reload'], text=True, capture_output=True)
+assert restore.returncode == 0 and json.loads(restore.stdout)['reloaded'], restore.stderr
 PY
 /usr/bin/python3 "$cli" --config "$config" notify timer:tea Tea --body "boil water" >/dev/null
 [[ "$(/usr/bin/python3 "$cli" --config "$config" act timer:tea 1 snooze --minutes 10080 | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')" == accepted ]]
@@ -153,7 +166,7 @@ PYTEST
 /usr/bin/python3 - "$state" <<'PYOWNER'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
-db.execute("UPDATE alerts SET source_id='eds-local',calendar_id='fixture',state='snoozed',snooze_until=1 WHERE id='eds:orphan'")
+db.execute("UPDATE alerts SET source_id='eds-local',calendar_id='fixture',owner='native',state='snoozed',snooze_until=1 WHERE id='eds:orphan'")
 db.commit()
 PYOWNER
 assert_state eds:orphan snoozed

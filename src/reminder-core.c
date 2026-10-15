@@ -5,6 +5,7 @@
 #include <time.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <math.h>
 #include <json-glib/json-glib.h>
 #include <libecal/libecal.h>
 
@@ -25,7 +26,10 @@ static EReminderWatcher *eds_watcher;
 static GHashTable *native_reminders;
 static GDBusConnection *bus_connection;
 static GSubprocess *overlay_process;
+static gchar *foreground_id;
 static gchar *audio_file;
+static gchar *validated_policy_json;
+static JsonNode *validated_policy_node;
 static gboolean audio_enabled;
 static gdouble audio_volume = 0.5;
 static guint audio_repeat_seconds;
@@ -33,6 +37,7 @@ static GSubprocess *audio_process;
 static guint audio_repeat_source;
 static gboolean audio_suppressed;
 static const gchar *playback_program = "/usr/bin/pw-play";
+static gchar *default_tone_file;
 static gboolean has_active_alerts (void);
 static void stop_audio (void);
 static void start_audio (void);
@@ -47,6 +52,9 @@ static const gchar introspection_xml[] =
   "<method name='List'><arg type='s' direction='out'/></method>"
   "<method name='ReloadPolicy'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='b' direction='out'/></method>"
   "<method name='StopAudio'></method>"
+  "<method name='SetForeground'><arg type='s' direction='in'/></method>"
+  "<method name='GetPolicy'><arg type='s' direction='out'/></method>"
+  "<method name='Diagnostics'><arg type='s' direction='out'/></method>"
   "<signal name='Changed'><arg type='s'/><arg type='t'/></signal>"
   "</interface></node>";
 
@@ -93,6 +101,10 @@ load_policy (const gchar *path, const gchar *helper, GError **error)
 	audio_volume = json_object_get_double_member (audio, "volume");
 	audio_repeat_seconds = (guint) json_object_get_int_member (audio, "repeat_seconds");
 	eds_enabled = json_object_get_boolean_member (calendar, "eds_enabled");
+	g_free (validated_policy_json);
+	validated_policy_json = g_strdup (stdout_text);
+	g_clear_pointer (&validated_policy_node, json_node_unref);
+	validated_policy_node = json_node_copy (json_parser_get_root (parser));
 	gchar *next_path = g_strdup (path), *next_helper = g_strdup (helper);
 	g_free (config_path); config_path = next_path;
 	g_free (helper_path); helper_path = next_helper;
@@ -108,10 +120,48 @@ has_active_alerts (void)
 {
 	sqlite3_stmt *st = NULL;
 	gboolean active = FALSE;
-	if (sqlite3_prepare_v2 (db, "SELECT 1 FROM alerts WHERE state='active' LIMIT 1", -1, &st, NULL) == SQLITE_OK)
+	if (foreground_id && *foreground_id) {
+		if (sqlite3_prepare_v2 (db, "SELECT 1 FROM alerts WHERE id=? AND state='active'", -1, &st, NULL) == SQLITE_OK) {
+			sqlite3_bind_text (st, 1, foreground_id, -1, SQLITE_TRANSIENT);
+			active = sqlite3_step (st) == SQLITE_ROW;
+		}
+	} else if (sqlite3_prepare_v2 (db, "SELECT 1 FROM alerts WHERE state='active' ORDER BY id LIMIT 1", -1, &st, NULL) == SQLITE_OK)
 		active = sqlite3_step (st) == SQLITE_ROW;
 	sqlite3_finalize (st);
 	return active;
+}
+
+static gchar *
+ensure_default_tone (void)
+{
+	const guint sample_rate = 22050, samples = 11025;
+	gchar *directory = g_build_filename (g_get_user_cache_dir (), "calendar-reminder-overlay", NULL);
+	gchar *path = g_build_filename (directory, "default-tone.wav", NULL);
+	if (g_file_test (path, G_FILE_TEST_IS_REGULAR)) { g_free (directory); return path; }
+	g_mkdir_with_parents (directory, 0700);
+	guint32 data_size = samples * 2, riff_size = 36 + data_size;
+	GByteArray *wav = g_byte_array_sized_new (44 + data_size);
+	const guint8 header[] = {
+		'R','I','F','F', riff_size & 255, (riff_size >> 8) & 255, (riff_size >> 16) & 255, (riff_size >> 24) & 255,
+		'W','A','V','E','f','m','t',' ', 16,0,0,0, 1,0, 1,0,
+		sample_rate & 255, (sample_rate >> 8) & 255, (sample_rate >> 16) & 255, (sample_rate >> 24) & 255,
+		(sample_rate * 2) & 255, ((sample_rate * 2) >> 8) & 255, ((sample_rate * 2) >> 16) & 255, ((sample_rate * 2) >> 24) & 255,
+		2,0,16,0, 'd','a','t','a', data_size & 255, (data_size >> 8) & 255, (data_size >> 16) & 255, (data_size >> 24) & 255
+	};
+	g_byte_array_append (wav, header, sizeof header);
+	for (guint i = 0; i < samples; i++) {
+		gdouble envelope = MIN (1.0, MIN (i / 350.0, (samples - i) / 500.0));
+		gint16 sample = (gint16) (sin (2.0 * G_PI * 880.0 * i / sample_rate) * 5000.0 * envelope);
+		guint8 bytes[] = { sample & 255, ((guint16) sample >> 8) & 255 };
+		g_byte_array_append (wav, bytes, sizeof bytes);
+	}
+	GError *error = NULL;
+	if (!g_file_set_contents (path, (const gchar *) wav->data, wav->len, &error)) {
+		g_warning ("Could not create default reminder tone: %s", error ? error->message : "write failed");
+		g_clear_error (&error); g_clear_pointer (&path, g_free);
+	}
+	g_byte_array_unref (wav); g_free (directory);
+	return path;
 }
 
 static void
@@ -165,23 +215,58 @@ start_audio (void)
 {
 	gchar *volume;
 	GError *error = NULL;
-	if (!audio_enabled || audio_suppressed || !audio_file || !*audio_file || !has_active_alerts ()) return;
-	if (audio_process) return;
-	if (!g_file_test (audio_file, G_FILE_TEST_IS_REGULAR)) {
-		g_warning ("Audio file is unavailable: %s", audio_file);
+	gboolean enabled = audio_enabled;
+	gchar *file = g_strdup (audio_file);
+	gdouble effective_volume = audio_volume;
+	guint repeat_seconds = audio_repeat_seconds;
+	sqlite3_stmt *st = NULL;
+	gchar *id = foreground_id && *foreground_id ? g_strdup (foreground_id) : NULL;
+	const gchar *source = NULL, *calendar = NULL;
+	if (id) {
+		if (sqlite3_prepare_v2 (db, "SELECT source_id,calendar_id FROM alerts WHERE id=? AND state='active'", -1, &st, NULL) == SQLITE_OK) {
+			sqlite3_bind_text (st, 1, id, -1, SQLITE_TRANSIENT);
+			if (sqlite3_step (st) == SQLITE_ROW) { source = g_strdup ((const gchar *) sqlite3_column_text (st, 0)); calendar = g_strdup ((const gchar *) sqlite3_column_text (st, 1)); }
+		}
+	} else if (sqlite3_prepare_v2 (db, "SELECT id,source_id,calendar_id FROM alerts WHERE state='active' ORDER BY id LIMIT 1", -1, &st, NULL) == SQLITE_OK && sqlite3_step (st) == SQLITE_ROW) {
+		id = g_strdup ((const gchar *) sqlite3_column_text (st, 0));
+		source = g_strdup ((const gchar *) sqlite3_column_text (st, 1));
+		calendar = g_strdup ((const gchar *) sqlite3_column_text (st, 2));
+	}
+	if (id && source && *source && calendar && *calendar && validated_policy_node) {
+				gchar *key = g_strdup_printf ("%s/%s", source, calendar);
+				JsonObject *root = json_node_get_object (validated_policy_node);
+				JsonObject *overrides = json_object_get_object_member (root, "calendar_overrides");
+				JsonObject *override = overrides ? json_object_get_object_member (overrides, key) : NULL;
+				if (override) {
+					if (json_object_has_member (override, "audio_enabled")) enabled = json_object_get_boolean_member (override, "audio_enabled");
+					if (json_object_has_member (override, "audio_file")) { g_free (file); file = g_strdup (json_object_get_string_member (override, "audio_file")); }
+					if (json_object_has_member (override, "audio_volume")) effective_volume = json_object_get_double_member (override, "audio_volume");
+					if (json_object_has_member (override, "audio_repeat_seconds")) repeat_seconds = (guint) json_object_get_int_member (override, "audio_repeat_seconds");
+				}
+				g_free (key);
+	}
+	sqlite3_finalize (st);
+	g_free (id); g_free ((gchar *) source); g_free ((gchar *) calendar);
+	if (!enabled || audio_suppressed || !has_active_alerts ()) { g_free (file); return; }
+	if (!file || !*file) { g_free (file); file = default_tone_file ? g_strdup (default_tone_file) : ensure_default_tone (); }
+	if (audio_process) { g_free (file); return; }
+	if (!g_file_test (file, G_FILE_TEST_IS_REGULAR)) {
+		g_warning ("Audio file is unavailable: %s", file ? file : "(none)");
+		g_free (file);
 		return;
 	}
-	volume = g_strdup_printf ("%.3f", audio_volume);
-	audio_process = g_subprocess_new (G_SUBPROCESS_FLAGS_NONE, &error, playback_program, "--volume", volume, audio_file, NULL);
+	volume = g_strdup_printf ("%.3f", effective_volume);
+	audio_process = g_subprocess_new (G_SUBPROCESS_FLAGS_NONE, &error, playback_program, "--volume", volume, file, NULL);
 	g_free (volume);
+	g_free (file);
 	if (!audio_process) {
 		g_warning ("Could not start audible reminder with %s: %s", playback_program, error ? error->message : "unknown error");
 		g_clear_error (&error);
 		return;
 	}
 	g_subprocess_wait_async (audio_process, NULL, audio_finished, NULL);
-	if (audio_repeat_seconds && !audio_repeat_source)
-		audio_repeat_source = g_timeout_add_seconds (audio_repeat_seconds, repeat_audio, NULL);
+	if (repeat_seconds && !audio_repeat_source)
+		audio_repeat_source = g_timeout_add_seconds (repeat_seconds, repeat_audio, NULL);
 }
 
 static gboolean
@@ -224,6 +309,7 @@ row_json (sqlite3_stmt *st)
   json_object_set_int_member (object, "event_start", sqlite3_column_int64 (st, 13));
   json_object_set_int_member (object, "event_end", sqlite3_column_int64 (st, 14));
   json_object_set_string_member (object, "occurrence", (const gchar *) sqlite3_column_text (st, 15));
+  json_object_set_string_member (object, "owner", (const gchar *) sqlite3_column_text (st, 16));
   json_node_take_object (node, object);
   gchar *result = json_to_string (node, FALSE);
   json_node_free (node);
@@ -235,7 +321,7 @@ read_one (const gchar *id, gchar **json, gchar **state, gint64 *revision, gint64
 {
   sqlite3_stmt *st = NULL;
   gboolean found = FALSE;
-  const gchar *sql = "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until,action_revision,source_id,calendar_id,event_start,event_end,occurrence FROM alerts WHERE id=?";
+  const gchar *sql = "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until,action_revision,source_id,calendar_id,event_start,event_end,occurrence,owner FROM alerts WHERE id=?";
   if (sqlite3_prepare_v2 (db, sql, -1, &st, NULL) == SQLITE_OK) {
     sqlite3_bind_text (st, 1, id, -1, SQLITE_TRANSIENT);
     if (sqlite3_step (st) == SQLITE_ROW) {
@@ -264,25 +350,30 @@ read_source_id (const gchar *id)
 	return source;
 }
 
+static gchar *
+read_owner (const gchar *id)
+{
+	sqlite3_stmt *st = NULL;
+	gchar *owner = NULL;
+	if (sqlite3_prepare_v2 (db, "SELECT owner FROM alerts WHERE id=?", -1, &st, NULL) == SQLITE_OK) {
+		sqlite3_bind_text (st, 1, id, -1, SQLITE_TRANSIENT);
+		if (sqlite3_step (st) == SQLITE_ROW) owner = g_strdup ((const gchar *) sqlite3_column_text (st, 0));
+	}
+	sqlite3_finalize (st);
+	return owner;
+}
+
 static void
 refresh_deadlines (void)
 {
   sqlite3_stmt *st = NULL;
   gint64 now = (gint64) time (NULL);
-  guint due_count = 0;
-  if (sqlite3_prepare_v2 (db, "SELECT id FROM alerts WHERE state='snoozed' AND source_id!='eds-local' AND snooze_until>0 AND snooze_until<=? AND (expires_at=0 OR expires_at>?)", -1, &st, NULL) == SQLITE_OK) {
-    sqlite3_bind_int64 (st, 1, now);
-    sqlite3_bind_int64 (st, 2, now);
-    while (sqlite3_step (st) == SQLITE_ROW) due_count++;
-  }
-  sqlite3_finalize (st); st = NULL;
-  sqlite3_prepare_v2 (db, "UPDATE alerts SET state='expired',revision=revision+1 WHERE state IN ('active','snoozed') AND source_id!='eds-local' AND expires_at>0 AND expires_at<=?", -1, &st, NULL);
+  sqlite3_prepare_v2 (db, "UPDATE alerts SET state='expired',revision=revision+1 WHERE state IN ('active','snoozed') AND owner!='native' AND expires_at>0 AND expires_at<=?", -1, &st, NULL);
   sqlite3_bind_int64 (st, 1, now); sqlite3_step (st); sqlite3_finalize (st);
   st = NULL;
-  sqlite3_prepare_v2 (db, "UPDATE alerts SET state='active',snooze_until=0,revision=revision+1 WHERE state='snoozed' AND source_id!='eds-local' AND snooze_until>0 AND snooze_until<=?", -1, &st, NULL);
+  sqlite3_prepare_v2 (db, "UPDATE alerts SET state='active',snooze_until=0,revision=revision+1 WHERE state='snoozed' AND owner!='native' AND snooze_until>0 AND snooze_until<=?", -1, &st, NULL);
   sqlite3_bind_int64 (st, 1, now); sqlite3_step (st); sqlite3_finalize (st);
-  if (!has_active_alerts ()) stop_audio ();
-  else if (due_count) { reset_audio_for_new_alert (); start_audio (); }
+	if (!has_active_alerts ()) stop_audio ();
 }
 
 static gboolean
@@ -335,12 +426,6 @@ save_alert (const gchar *id, const gchar *title, const gchar *body, const gchar 
   if (sqlite3_step (st) != SQLITE_DONE) goto failed;
   sqlite3_finalize (st); st = NULL;
   read_one (id, NULL, NULL, (gint64 *) revision, NULL, NULL);
-  gchar *saved_state = NULL;
-  if (!old_state && read_one (id, NULL, &saved_state, NULL, NULL, NULL) && g_str_equal (saved_state, "active")) {
-    reset_audio_for_new_alert ();
-    start_audio ();
-  }
-  g_free (saved_state);
   g_free (old_state);
   return TRUE;
 failed:
@@ -462,7 +547,7 @@ native_reminder_triggered (EReminderWatcher *watcher, const GSList *reminders, g
 		g_free (state); state = NULL;
 		if (read_one (id, NULL, &state, NULL, NULL, NULL) && g_str_equal (state, "active")) {
 			sqlite3_stmt *st = NULL;
-			if (sqlite3_prepare_v2 (db, "UPDATE alerts SET source_id='eds-local',calendar_id=?,event_start=?,event_end=?,occurrence=? WHERE id=?", -1, &st, NULL) == SQLITE_OK) {
+			if (sqlite3_prepare_v2 (db, "UPDATE alerts SET source_id='eds-local',calendar_id=?,event_start=?,event_end=?,occurrence=?,owner='native' WHERE id=?", -1, &st, NULL) == SQLITE_OK) {
 				sqlite3_bind_text (st, 1, source_uid, -1, SQLITE_TRANSIENT);
 				sqlite3_bind_int64 (st, 2, start);
 				sqlite3_bind_int64 (st, 3, end);
@@ -472,7 +557,7 @@ native_reminder_triggered (EReminderWatcher *watcher, const GSList *reminders, g
 			}
 			sqlite3_finalize (st);
 			g_hash_table_replace (native_reminders, g_strdup (id), e_reminder_data_copy (reminder));
-			if (reactivated) { reset_audio_for_new_alert (); start_audio (); }
+			(void) reactivated;
 			if (bus_connection) g_dbus_connection_emit_signal (bus_connection, NULL, OBJECT_PATH, IFACE, "Changed", g_variant_new ("(st)", id, revision), NULL);
 		}
 		g_free (state);
@@ -503,18 +588,63 @@ restore_native_reminder_pointers (void)
 	g_slist_free_full (snoozed, e_reminder_data_free);
 }
 
+static gchar *
+diagnostics_json (void)
+{
+	JsonBuilder *builder = json_builder_new ();
+	JsonGenerator *generator;
+	gchar *result;
+	sqlite3_stmt *st = NULL;
+	json_builder_begin_object (builder);
+	json_builder_set_member_name (builder, "eds_enabled"); json_builder_add_boolean_value (builder, eds_enabled);
+	json_builder_set_member_name (builder, "last_scan_unix"); json_builder_add_int_value (builder, 0);
+	json_builder_set_member_name (builder, "calendars"); json_builder_begin_array (builder);
+	if (sqlite3_prepare_v2 (db, "SELECT calendar_id,state,last_success_unix,error,event_count FROM calendar_sync ORDER BY calendar_id", -1, &st, NULL) == SQLITE_OK) {
+		while (sqlite3_step (st) == SQLITE_ROW) {
+			json_builder_begin_object (builder);
+			json_builder_set_member_name (builder, "calendar_id"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 0));
+			json_builder_set_member_name (builder, "state"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 1));
+			json_builder_set_member_name (builder, "last_success_unix"); json_builder_add_int_value (builder, sqlite3_column_int64 (st, 2));
+			json_builder_set_member_name (builder, "error"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 3));
+			json_builder_set_member_name (builder, "events"); json_builder_add_int_value (builder, sqlite3_column_int (st, 4));
+			json_builder_end_object (builder);
+		}
+	}
+	sqlite3_finalize (st);
+	json_builder_end_array (builder);
+	json_builder_end_object (builder);
+	generator = json_generator_new ();
+	json_generator_set_root (generator, json_builder_get_root (builder));
+	result = json_generator_to_data (generator, NULL);
+	g_object_unref (generator); g_object_unref (builder);
+	return result;
+}
+
 static void
 method_call (GDBusConnection *connection, const gchar *sender, const gchar *path, const gchar *interface, const gchar *method, GVariant *parameters, GDBusMethodInvocation *invocation, gpointer data)
 {
   const gchar *id;
+  sqlite3_stmt *metadata = NULL;
   (void) sender; (void) path; (void) interface; (void) data;
   if (g_str_equal (method, "Submit") || g_str_equal (method, "Update")) {
     const gchar *source_id, *calendar_id, *title, *body, *destination; guint64 expires, revision = 0; GError *error = NULL;
+    gchar *previous_state = NULL;
+    gboolean was_active = has_active_alerts ();
     g_variant_get (parameters, "(&s&s&s&s&s&st)", &source_id, &calendar_id, &id, &title, &body, &destination, &expires);
+	read_one (id, NULL, &previous_state, NULL, NULL, NULL);
 	if (((source_id && *source_id) || (calendar_id && *calendar_id)) && !source_selected (source_id, calendar_id))
 		g_set_error (&error, G_IO_ERROR, G_IO_ERROR_PERMISSION_DENIED, "source/calendar is not selected by the active config");
 	else
 		save_alert (id, title, body, destination, expires, g_str_equal (method, "Update"), &revision, &error);
+	if (!error && sqlite3_prepare_v2 (db, "UPDATE alerts SET source_id=?,calendar_id=?,owner='producer' WHERE id=?", -1, &metadata, NULL) == SQLITE_OK) {
+		sqlite3_bind_text (metadata, 1, source_id ? source_id : "", -1, SQLITE_TRANSIENT);
+		sqlite3_bind_text (metadata, 2, calendar_id ? calendar_id : "", -1, SQLITE_TRANSIENT);
+		sqlite3_bind_text (metadata, 3, id, -1, SQLITE_TRANSIENT);
+		sqlite3_step (metadata);
+	}
+	sqlite3_finalize (metadata); metadata = NULL;
+	if (!error && !previous_state && !was_active && (!foreground_id || !*foreground_id)) { reset_audio_for_new_alert (); start_audio (); }
+	g_free (previous_state);
 	if (error)
 		g_dbus_method_invocation_return_gerror (invocation, error);
 	else {
@@ -528,7 +658,8 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
     found = read_one (id, NULL, NULL, NULL, NULL, NULL);
 	EReminderData *native = native_reminders ? g_hash_table_lookup (native_reminders, id) : NULL;
 	gchar *source_id = found ? read_source_id (id) : NULL;
-	if (found && g_strcmp0 (source_id, "eds-local") == 0 && !native) found = FALSE;
+	gchar *owner = found ? read_owner (id) : NULL;
+	if (found && g_strcmp0 (owner, "native") == 0 && !native) found = FALSE;
 	if (found && native && !e_reminder_watcher_dismiss_sync (eds_watcher, native, NULL, &native_error)) {
 		g_warning ("Could not cancel native EDS reminder %s: %s", id, native_error ? native_error->message : "unknown error");
 		g_clear_error (&native_error);
@@ -538,7 +669,7 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 		sqlite3_bind_text (st, 1, id, -1, SQLITE_TRANSIENT); sqlite3_step (st); found = sqlite3_changes (db) == 1; sqlite3_finalize (st);
     }
     if (found && native_reminders) g_hash_table_remove (native_reminders, id);
-    g_free (source_id);
+	    g_free (source_id); g_free (owner);
     g_dbus_method_invocation_return_value (invocation, g_variant_new ("(b)", found));
     if (found) stop_audio ();
   } else if (g_str_equal (method, "Act")) {
@@ -546,7 +677,8 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
     g_variant_get (parameters, "(&st&s&s)", &id, &revision, &action, &payload); refresh_deadlines ();
     native = native_reminders ? g_hash_table_lookup (native_reminders, id) : NULL;
     gchar *source_id = read_source_id (id);
-    gboolean native_owner = g_strcmp0 (source_id, "eds-local") == 0;
+    gchar *owner = read_owner (id);
+    gboolean native_owner = g_strcmp0 (owner, "native") == 0;
     if (read_one (id, NULL, &old_state, &current, NULL, NULL) && current == (gint64) revision && g_str_equal (old_state, "active")) {
       if (g_str_equal (action, "dismiss")) state = "dismissed";
       else if (g_str_equal (action, "snooze")) {
@@ -589,7 +721,7 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
       }
     }
     sqlite3_finalize (st); g_free (old_state);
-    g_free (source_id);
+    g_free (source_id); g_free (owner);
     if (g_str_equal (result, "accepted")) {
 		stop_audio ();
 		if (native && !g_str_equal (state, "snoozed")) g_hash_table_remove (native_reminders, id);
@@ -616,7 +748,7 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
     sqlite3_finalize (st);
   } else if (g_str_equal (method, "List")) {
     sqlite3_stmt *st = NULL; GString *list = g_string_new ("["); gboolean first = TRUE; refresh_deadlines ();
-    if (sqlite3_prepare_v2 (db, "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until,action_revision,source_id,calendar_id,event_start,event_end,occurrence FROM alerts ORDER BY id", -1, &st, NULL) == SQLITE_OK) while (sqlite3_step (st) == SQLITE_ROW) {
+    if (sqlite3_prepare_v2 (db, "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until,action_revision,source_id,calendar_id,event_start,event_end,occurrence,owner FROM alerts ORDER BY id", -1, &st, NULL) == SQLITE_OK) while (sqlite3_step (st) == SQLITE_ROW) {
       gchar *item = row_json (st); if (!first) g_string_append_c (list, ','); g_string_append (list, item); g_free (item); first = FALSE;
     }
     sqlite3_finalize (st); g_string_append_c (list, ']'); g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", list->str)); g_string_free (list, TRUE);
@@ -625,11 +757,51 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 	g_variant_get (parameters, "(&s&s)", &path_in, &helper_in);
 	ok = load_policy (path_in, helper_in, &error);
 	if (!ok && error) g_warning ("Config reload failed; preserving last valid source selection: %s", error->message);
+	if (ok) {
+		sqlite3_stmt *rows = NULL, *update = NULL;
+		GPtrArray *withdraw = g_ptr_array_new_with_free_func (g_free);
+		if (sqlite3_prepare_v2 (db, "SELECT id,source_id,calendar_id FROM alerts WHERE state IN ('active','snoozed','scheduled') AND source_id!='' AND calendar_id!=''", -1, &rows, NULL) == SQLITE_OK) {
+			while (sqlite3_step (rows) == SQLITE_ROW) {
+				const gchar *source = (const gchar *) sqlite3_column_text (rows, 1);
+				const gchar *calendar = (const gchar *) sqlite3_column_text (rows, 2);
+				if (!source_selected (source, calendar)) g_ptr_array_add (withdraw, g_strdup ((const gchar *) sqlite3_column_text (rows, 0)));
+			}
+		}
+		sqlite3_finalize (rows);
+		if (sqlite3_prepare_v2 (db, "UPDATE alerts SET state='withdrawn',revision=revision+1 WHERE id=?", -1, &update, NULL) == SQLITE_OK) {
+			for (guint i = 0; i < withdraw->len; i++) { sqlite3_reset (update); sqlite3_bind_text (update, 1, g_ptr_array_index (withdraw, i), -1, SQLITE_TRANSIENT); sqlite3_step (update); }
+		}
+		sqlite3_finalize (update); g_ptr_array_unref (withdraw);
+		if (foreground_id) { gchar *state = NULL; if (!read_one (foreground_id, NULL, &state, NULL, NULL, NULL) || !g_str_equal (state, "active")) { stop_audio (); g_clear_pointer (&foreground_id, g_free); } g_free (state); }
+	}
 	g_clear_error (&error);
 	g_dbus_method_invocation_return_value (invocation, g_variant_new ("(b)", ok));
 	} else if (g_str_equal (method, "StopAudio")) {
 		stop_audio ();
 		g_dbus_method_invocation_return_value (invocation, NULL);
+	} else if (g_str_equal (method, "SetForeground")) {
+		const gchar *next_id;
+		g_variant_get (parameters, "(&s)", &next_id);
+		if (!next_id || !*next_id) {
+			g_clear_pointer (&foreground_id, g_free);
+			stop_audio ();
+		} else {
+			gchar *state = NULL;
+			if (read_one (next_id, NULL, &state, NULL, NULL, NULL) && g_str_equal (state, "active") && (g_strcmp0 (foreground_id, next_id) != 0 || audio_suppressed)) {
+				g_free (foreground_id);
+				foreground_id = g_strdup (next_id);
+				reset_audio_for_new_alert ();
+				start_audio ();
+			}
+			g_free (state);
+		}
+		g_dbus_method_invocation_return_value (invocation, NULL);
+	} else if (g_str_equal (method, "GetPolicy")) {
+		g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", validated_policy_json ? validated_policy_json : "{}"));
+	} else if (g_str_equal (method, "Diagnostics")) {
+		gchar *json = diagnostics_json ();
+		g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", json));
+		g_free (json);
   }
 }
 
@@ -662,9 +834,10 @@ int main (int argc, char **argv)
   }
   if (sqlite3_open (state_path, &db) != SQLITE_OK) { g_printerr ("open state db: %s\n", sqlite3_errmsg (db)); return 1; }
   sqlite3_busy_timeout (db, 5000); sqlite3_exec (db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;", NULL, NULL, NULL);
-  if (!exec_sql ("CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,destination TEXT NOT NULL,state TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,revision INTEGER NOT NULL,expires_at INTEGER NOT NULL,snooze_until INTEGER NOT NULL,action_revision INTEGER NOT NULL DEFAULT 0,source_id TEXT NOT NULL DEFAULT '',calendar_id TEXT NOT NULL DEFAULT '',event_start INTEGER NOT NULL DEFAULT 0,event_end INTEGER NOT NULL DEFAULT 0,occurrence TEXT NOT NULL DEFAULT '');", &error)) { g_printerr ("state schema: %s\n", error->message); return 1; }
+  if (!exec_sql ("CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,destination TEXT NOT NULL,state TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,revision INTEGER NOT NULL,expires_at INTEGER NOT NULL,snooze_until INTEGER NOT NULL,action_revision INTEGER NOT NULL DEFAULT 0,source_id TEXT NOT NULL DEFAULT '',calendar_id TEXT NOT NULL DEFAULT '',event_start INTEGER NOT NULL DEFAULT 0,event_end INTEGER NOT NULL DEFAULT 0,occurrence TEXT NOT NULL DEFAULT '',owner TEXT NOT NULL DEFAULT 'producer');", &error)) { g_printerr ("state schema: %s\n", error->message); return 1; }
+  if (!exec_sql ("CREATE TABLE IF NOT EXISTS calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT NOT NULL,last_success_unix INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',event_count INTEGER NOT NULL DEFAULT 0);", &error)) { g_printerr ("calendar diagnostics schema: %s\n", error->message); return 1; }
   sqlite3_stmt *columns = NULL;
-  gboolean has_action_revision = FALSE, has_source_id = FALSE, has_calendar_id = FALSE, has_event_start = FALSE, has_event_end = FALSE, has_occurrence = FALSE;
+  gboolean has_action_revision = FALSE, has_source_id = FALSE, has_calendar_id = FALSE, has_event_start = FALSE, has_event_end = FALSE, has_occurrence = FALSE, has_owner = FALSE;
   if (sqlite3_prepare_v2 (db, "PRAGMA table_info(alerts)", -1, &columns, NULL) != SQLITE_OK) return 1;
   while (sqlite3_step (columns) == SQLITE_ROW) {
     const gchar *name = (const gchar *) sqlite3_column_text (columns, 1);
@@ -674,6 +847,7 @@ int main (int argc, char **argv)
     else if (g_strcmp0 (name, "event_start") == 0) has_event_start = TRUE;
     else if (g_strcmp0 (name, "event_end") == 0) has_event_end = TRUE;
     else if (g_strcmp0 (name, "occurrence") == 0) has_occurrence = TRUE;
+    else if (g_strcmp0 (name, "owner") == 0) has_owner = TRUE;
   }
   sqlite3_finalize (columns);
   if (!has_action_revision && !exec_sql ("ALTER TABLE alerts ADD COLUMN action_revision INTEGER NOT NULL DEFAULT 0", &error)) {
@@ -684,6 +858,7 @@ int main (int argc, char **argv)
   if (!has_event_start && !exec_sql ("ALTER TABLE alerts ADD COLUMN event_start INTEGER NOT NULL DEFAULT 0", &error)) return 1;
   if (!has_event_end && !exec_sql ("ALTER TABLE alerts ADD COLUMN event_end INTEGER NOT NULL DEFAULT 0", &error)) return 1;
   if (!has_occurrence && !exec_sql ("ALTER TABLE alerts ADD COLUMN occurrence TEXT NOT NULL DEFAULT ''", &error)) return 1;
+  if (!has_owner && !exec_sql ("ALTER TABLE alerts ADD COLUMN owner TEXT NOT NULL DEFAULT 'producer'", &error)) return 1;
   node = g_dbus_node_info_new_for_xml (introspection_xml, &error);
   if (!node) { g_printerr ("D-Bus schema: %s\n", error->message); return 1; }
   connection = g_bus_get_sync (G_BUS_TYPE_SESSION, NULL, &error);
