@@ -36,7 +36,7 @@ static guint eds_rescan_source;
 static guint eds_retry_source;
 static gboolean global_native_default;
 static GSettings *global_calendar_settings;
-static gboolean renderer_armed;
+static GHashTable *presented_alerts;
 static gboolean renderer_check_pending;
 static gboolean renderer_retry_exhausted;
 static guint overlay_retry_source;
@@ -1200,11 +1200,18 @@ static gboolean
 renderer_should_run (void)
 {
 	gboolean armed_active = FALSE;
-	if (renderer_armed && foreground_id && *foreground_id) {
-		gchar *state = NULL;
-		armed_active = read_one (foreground_id, NULL, &state, NULL, NULL, NULL) && g_str_equal (state, "active");
-		g_free (state);
-		if (!armed_active) renderer_armed = FALSE;
+	if (presented_alerts) {
+		GHashTableIter iter;
+		gpointer id;
+		g_hash_table_iter_init (&iter, presented_alerts);
+		while (g_hash_table_iter_next (&iter, &id, NULL)) {
+			gchar *state = NULL;
+			gboolean exists = read_one (id, NULL, &state, NULL, NULL, NULL);
+			if (exists && g_str_equal (state, "active")) armed_active = TRUE;
+			else if (!exists || (!g_str_equal (state, "snoozed") && !g_str_equal (state, "scheduled")))
+				g_hash_table_iter_remove (&iter);
+			g_free (state);
+		}
 	}
 	return overlay_path && *overlay_path && (any_eligible_calendar_alerts () || armed_active);
 }
@@ -1620,7 +1627,6 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 			sqlite3_exec (db, "DELETE FROM eds_occurrences", NULL, NULL, NULL);
 			stop_audio ();
 			g_clear_pointer (&foreground_id, g_free);
-			renderer_armed = FALSE;
 		}
 	}
 	g_clear_error (&error);
@@ -1632,7 +1638,6 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 		const gchar *next_id;
 		g_variant_get (parameters, "(&s)", &next_id);
 		if (!next_id || !*next_id) {
-			renderer_armed = FALSE;
 			g_clear_pointer (&foreground_id, g_free);
 			stop_audio ();
 		} else {
@@ -1644,7 +1649,11 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 				reset_audio_for_new_alert ();
 				start_audio ();
 			}
-			if (state && g_str_equal (state, "active")) { renderer_armed = TRUE; ensure_renderer (); }
+			if (state && g_str_equal (state, "active")) {
+				if (!presented_alerts) presented_alerts = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+				g_hash_table_add (presented_alerts, g_strdup (next_id));
+				ensure_renderer ();
+			}
 			g_free (state);
 		}
 		g_dbus_method_invocation_return_value (invocation, NULL);
@@ -1734,5 +1743,5 @@ int main (int argc, char **argv)
   g_unix_signal_add (SIGTERM, terminate_core, NULL);
   g_unix_signal_add (SIGINT, terminate_core, NULL);
   g_main_loop_run (loop);
-  stop_audio (); stop_eds (); if (overlay_process) g_subprocess_force_exit (overlay_process); g_clear_object (&overlay_process); g_clear_pointer (&eds_scans, g_hash_table_unref); g_clear_pointer (&native_reminders, g_hash_table_unref); g_dbus_connection_unregister_object (connection, registration); bus_connection = NULL; g_object_unref (connection); g_dbus_node_info_unref (node); sqlite3_close (db); g_free (state_path); g_free (config_path); g_free (helper_path); g_free (overlay_path); g_free (policy_mode); g_free (audio_file); g_hash_table_unref (selected_calendars); return 0;
+  g_clear_pointer (&presented_alerts, g_hash_table_unref); stop_audio (); stop_eds (); if (overlay_process) g_subprocess_force_exit (overlay_process); g_clear_object (&overlay_process); g_clear_pointer (&eds_scans, g_hash_table_unref); g_clear_pointer (&native_reminders, g_hash_table_unref); g_dbus_connection_unregister_object (connection, registration); bus_connection = NULL; g_object_unref (connection); g_dbus_node_info_unref (node); sqlite3_close (db); g_free (state_path); g_free (config_path); g_free (helper_path); g_free (overlay_path); g_free (policy_mode); g_free (audio_file); g_hash_table_unref (selected_calendars); return 0;
 }
