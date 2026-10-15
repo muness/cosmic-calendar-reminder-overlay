@@ -31,7 +31,7 @@ def load_config(path):
     try:
         config = tomllib.loads(pathlib.Path(path).read_text())
     except FileNotFoundError:
-        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0, "volume": 0.5}, "calendar": {"eds_enabled": False}, "calendar_overrides": {}}
+        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0, "volume": 0.5}, "calendar": {"eds_enabled": False, "follow_selection": True}, "calendar_overrides": {}}
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ValueError(f"cannot load config {path}: {exc}") from exc
     _keys(config, {"version", "selection", "reminders", "snooze", "display", "appearance", "audio", "calendar", "calendar_overrides"}, "root")
@@ -74,9 +74,9 @@ def load_config(path):
     if type(volume) not in (int, float) or not 0 <= volume <= 1:
         raise ValueError("[audio].volume must be a number from 0 to 1")
     calendar = config.get("calendar", {})
-    _keys(calendar, {"eds_enabled"}, "calendar")
-    if not isinstance(calendar.get("eds_enabled", False), bool):
-        raise ValueError("[calendar].eds_enabled must be boolean")
+    _keys(calendar, {"eds_enabled", "follow_selection"}, "calendar")
+    if not isinstance(calendar.get("eds_enabled", False), bool) or not isinstance(calendar.get("follow_selection", True), bool):
+        raise ValueError("[calendar].eds_enabled and [calendar].follow_selection must be boolean")
     overrides = config.get("calendar_overrides", {})
     if not isinstance(overrides, dict):
         raise ValueError("[calendar_overrides] must be a table keyed by source_id/calendar_id")
@@ -119,7 +119,7 @@ def load_config(path):
     return {
         **config,
         "selection": {"mode": mode, "calendars": calendars},
-        "calendar": {"eds_enabled": calendar.get("eds_enabled", False)},
+        "calendar": {"eds_enabled": calendar.get("eds_enabled", False), "follow_selection": calendar.get("follow_selection", True)},
         "audio": {"enabled": audio.get("enabled", False), "file": audio.get("file", ""), "repeat_seconds": repeat, "volume": volume},
         "reminders": {"fallback_lead_minutes": lead},
         "snooze": {"minutes": minutes},
@@ -197,6 +197,9 @@ def main():
     p = sub.add_parser("cancel"); p.add_argument("id")
     p = sub.add_parser("status"); p.add_argument("id")
     sub.add_parser("diagnostics", help="show calendar source freshness and errors from the running core")
+    for name in ("enable", "disable", "presentation-status"):
+        p = sub.add_parser(name, help="enable, disable, or inspect reminder presentation")
+        p.add_argument("--json", action="store_true", help="print machine-readable status")
     p = sub.add_parser("list")
     p = sub.add_parser("act"); p.add_argument("id"); p.add_argument("revision", type=int); p.add_argument("action", choices=["open", "dismiss", "snooze", "snooze-until"]); p.add_argument("--minutes", type=int, default=5); p.add_argument("--until", type=int, help="Unix timestamp for snooze-until")
     p = sub.add_parser("wait"); p.add_argument("id"); p.add_argument("--after-revision", type=int, default=0); p.add_argument("--timeout", type=int, default=0)
@@ -230,9 +233,14 @@ def main():
                 parent_uid = source.get_parent()
                 parent = registry.ref_source(parent_uid) if parent_uid else None
                 extension = source.get_extension(EDataServer.SOURCE_EXTENSION_CALENDAR)
+                # This includes disabled parent accounts, unlike get_enabled().
+                source_enabled = bool(registry.check_enabled(source))
+                selected_in_evolution = bool(extension.get_selected())
+                selected_by_config = selected(config, "eds-local", uid)
+                is_selected = source_enabled and selected_by_config and (not config["calendar"]["follow_selection"] or selected_in_evolution)
                 selection_key = f"eds-local/{uid}"
                 snippet = f'[calendar]\neds_enabled = true\n\n[selection]\nmode = "include"\ncalendars = [{json.dumps(selection_key)}]\n'
-                records.append({"source_id": "eds-local", "calendar_id": uid, "selection_key": selection_key, "name": source.get_display_name(), "account": parent.get_display_name() if parent else "", "provider": extension.get_backend_name(), "selected": selected(config, "eds-local", uid), "toml_snippet": snippet})
+                records.append({"source_id": "eds-local", "calendar_id": uid, "selection_key": selection_key, "name": source.get_display_name(), "account": parent.get_display_name() if parent else "", "provider": extension.get_backend_name(), "enabled": source_enabled, "selected": is_selected, "selected_by_config": selected_by_config, "evolution_selected": selected_in_evolution, "toml_snippet": snippet})
             records.sort(key=lambda item: (item["account"].casefold(), item["name"].casefold(), item["calendar_id"]))
             if args.snippet:
                 match = next((item for item in records if args.snippet in (item["calendar_id"], item["selection_key"])), None)
@@ -255,6 +263,19 @@ def main():
             else: raise SystemExit(message)
         return
     ensure_service(args.core, args.config)
+    if args.command in ("enable", "disable"):
+        enabled = args.command == "enable"
+        accepted = call("SetPresentation", "(b)", (enabled,))[0]
+        state = "enabled" if enabled else "disabled"
+        result = {"accepted": bool(accepted), "enabled": enabled}
+        if args.json: print(json.dumps(result))
+        else: print(f"Reminder presentation {state}" if accepted else f"Could not persist reminder presentation {state}")
+        raise SystemExit(0 if accepted else 1)
+    if args.command == "presentation-status":
+        enabled = call("GetPresentation")[0]
+        if args.json: print(json.dumps({"enabled": bool(enabled)}))
+        else: print(f"Reminder presentation is {'enabled' if enabled else 'disabled'}")
+        return
     if args.command == "reload":
         ok = call("ReloadPolicy", "(ss)", (args.config, str(pathlib.Path(__file__).resolve())))[0]
         print(json.dumps({"reloaded": ok}))

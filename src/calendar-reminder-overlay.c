@@ -34,6 +34,7 @@ static GDBusConnection *core_connection;
 static gboolean watch_refreshing;
 static gboolean watch_action_pending;
 static gboolean policy_changed;
+static gboolean renderer_presentation_enabled = TRUE;
 static GPtrArray *watch_views;
 static GtkCssProvider *application_css;
 static gchar *outputs_mode;
@@ -160,7 +161,7 @@ apply_policy_json (const gchar *json)
 		return;
 	}
 	gboolean layout_changed = current_policy == NULL;
-	const gchar *layout_keys[] = { "display", "snooze", "calendar_overrides" };
+	const gchar *layout_keys[] = { "display", "snooze", "calendar_overrides", "presentation" };
 	for (guint i = 0; current_policy && i < G_N_ELEMENTS (layout_keys); i++) {
 		JsonNode *before = json_object_get_member (json_node_get_object (current_policy), layout_keys[i]);
 		JsonNode *after = json_object_get_member (json_node_get_object (incoming), layout_keys[i]);
@@ -172,6 +173,8 @@ apply_policy_json (const gchar *json)
 	JsonObject *root = json_node_get_object (current_policy);
 	JsonObject *display = json_object_get_object_member (root, "display");
 	JsonObject *appearance = json_object_get_object_member (root, "appearance");
+	JsonObject *presentation = json_object_has_member (root, "presentation") ? json_object_get_object_member (root, "presentation") : NULL;
+	renderer_presentation_enabled = !presentation || !json_object_has_member (presentation, "enabled") || json_object_get_boolean_member (presentation, "enabled");
 	JsonArray *minutes = json_object_get_array_member (json_object_get_object_member (root, "snooze"), "minutes");
 	g_free (outputs_mode); outputs_mode = g_strdup (display ? json_object_get_string_member (display, "outputs") : "all");
 	g_free (display_backend); display_backend = g_strdup (display ? json_object_get_string_member (display, "backend") : "native");
@@ -586,6 +589,12 @@ render_list_snapshot (const gchar *json)
 	if (!json_parser_load_from_data (parser, json, -1, &error)) {
 		g_debug ("Alert watch received invalid core state: %s", error ? error->message : "invalid JSON");
 		g_clear_error (&error);
+		g_object_unref (parser);
+		return;
+	}
+	if (!renderer_presentation_enabled) {
+		watch_set_foreground ("");
+		if (watch_current_ui || (watch_views && watch_views->len)) clear_watch_views ();
 		g_object_unref (parser);
 		return;
 	}
