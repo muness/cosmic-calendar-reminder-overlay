@@ -54,3 +54,7 @@ This is a personal project in active development, tested on COSMIC Wayland with 
 ## Reuse and portability research
 
 See [the problem-space and reuse audit](docs/attention-overlay-research.md) for the verified component capabilities, existing alternatives, source/display boundaries, and proposed CLI/TOML configuration. The proposed features in that report are not yet implemented.
+
+## Epic and implementation plan
+
+[The epic](https://github.com/muness/cosmic-calendar-reminder-overlay/issues/1) tracks the selected top-level capability issues. [The planning record](docs/attention-overlay-plan.md) preserves the Aim, independent problem frames, selected S&T steps, dependencies, evidence gates and deferred alternatives.

@@ -1,0 +1,185 @@
+{
+  "repository": "muness/cosmic-calendar-reminder-overlay",
+  "plan": "https://github.com/muness/cosmic-calendar-reminder-overlay/blob/main/docs/attention-overlay-plan.md",
+  "epic": {
+    "number": 1,
+    "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/1",
+    "step": "R0"
+  },
+  "issues": [
+    {
+      "key": "contract",
+      "number": 2,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/2",
+      "title": "Define a shared alert lifecycle and actionable UI contract",
+      "step": "R2.1",
+      "parent_step": "R2",
+      "sufficiency_group": "G2",
+      "additional_steps": [
+        "R1.2"
+      ],
+      "disposition": "selected",
+      "depends_on": [],
+      "owner_role": "Core and interaction maintainer",
+      "review_trigger": "Review before publishing a CLI/API or whenever a new source cannot express its native action semantics."
+    },
+    {
+      "key": "config",
+      "number": 3,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/3",
+      "title": "Add validated TOML configuration and explicit source/calendar selection",
+      "step": "R1.1",
+      "parent_step": "R1",
+      "sufficiency_group": "G1",
+      "additional_steps": [],
+      "disposition": "selected",
+      "depends_on": [
+        2
+      ],
+      "owner_role": "Configuration and calendar integration maintainer",
+      "review_trigger": "Review when a provider changes identities or a configuration default could expand interruption scope."
+    },
+    {
+      "key": "runtime",
+      "number": 4,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/4",
+      "title": "Make alert state reliable across concurrency, restart and suspend/resume",
+      "step": "R3.3",
+      "parent_step": "R3",
+      "sufficiency_group": "G3",
+      "additional_steps": [
+        "R1.2"
+      ],
+      "disposition": "selected",
+      "depends_on": [
+        2
+      ],
+      "owner_role": "Runtime and calendar lifecycle maintainer",
+      "review_trigger": "Review after any lost reminder, duplicate action, stale replay or scheduler-ownership change."
+    },
+    {
+      "key": "eds",
+      "number": 5,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/5",
+      "title": "Isolate the EDS source adapter and reconcile native and fallback reminders",
+      "step": "R2.2",
+      "parent_step": "R2",
+      "sufficiency_group": "G2",
+      "additional_steps": [],
+      "disposition": "selected",
+      "depends_on": [
+        2,
+        3
+      ],
+      "owner_role": "EDS integration maintainer",
+      "review_trigger": "Review after any native/fallback overlap, recurring-instance mismatch or account reconnect."
+    },
+    {
+      "key": "cli",
+      "number": 6,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/6",
+      "title": "Expose an opt-in local CLI/JSON interface for external alert producers",
+      "step": "R2.3",
+      "parent_step": "R2",
+      "sufficiency_group": "G2",
+      "additional_steps": [],
+      "disposition": "selected",
+      "depends_on": [
+        2,
+        3,
+        4
+      ],
+      "owner_role": "CLI and source interface maintainer",
+      "review_trigger": "Review before treating an example producer as a supported adapter or freezing the external protocol."
+    },
+    {
+      "key": "layer",
+      "number": 7,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/7",
+      "title": "Support the shared large overlay on COSMIC, Hyprland and KDE Wayland",
+      "step": "R3.1",
+      "parent_step": "R3",
+      "sufficiency_group": "G3",
+      "additional_steps": [],
+      "disposition": "selected",
+      "depends_on": [
+        2
+      ],
+      "owner_role": "Display compatibility maintainer",
+      "review_trigger": "Review on any compositor/library upgrade, focus/stacking failure or monitor topology change."
+    },
+    {
+      "key": "gnome",
+      "number": 8,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/8",
+      "title": "Establish GNOME Wayland display support with a shared-UI feasibility gate",
+      "step": "R3.2",
+      "parent_step": "R3",
+      "sufficiency_group": "G3",
+      "additional_steps": [
+        "R3.2a"
+      ],
+      "disposition": "selected",
+      "depends_on": [
+        2
+      ],
+      "owner_role": "GNOME display investigator and maintainer",
+      "review_trigger": "Review at the shared-UI experiment result and each supported GNOME release boundary."
+    },
+    {
+      "key": "audio",
+      "number": 9,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/9",
+      "title": "Add configurable audible alerts tied to the visible reminder lifecycle",
+      "step": "R1.3",
+      "parent_step": "R1",
+      "sufficiency_group": "G1",
+      "additional_steps": [],
+      "disposition": "selected",
+      "depends_on": [
+        2,
+        3,
+        4
+      ],
+      "owner_role": "Audio and interaction maintainer",
+      "review_trigger": "Review on a playback leak, competing alert, failed device or changed interruption policy."
+    },
+    {
+      "key": "kde_source",
+      "number": 10,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/10",
+      "title": "Discovery: establish the native KDE/Akonadi calendar adapter boundary",
+      "step": "R2.4",
+      "parent_step": "R2",
+      "sufficiency_group": "G2",
+      "additional_steps": [],
+      "disposition": "selected",
+      "depends_on": [
+        2
+      ],
+      "owner_role": "Calendar interoperability investigator",
+      "review_trigger": "Review when the evidence is available, the adapter would require a sync-engine rewrite or a user needs unsupported capabilities."
+    },
+    {
+      "key": "install",
+      "number": 11,
+      "url": "https://github.com/muness/cosmic-calendar-reminder-overlay/issues/11",
+      "title": "Ship repeatable user-service installation, migration and diagnostics",
+      "step": "R3.4",
+      "parent_step": "R3",
+      "sufficiency_group": "G3",
+      "additional_steps": [],
+      "disposition": "selected",
+      "depends_on": [
+        3,
+        5,
+        6,
+        7,
+        4,
+        9
+      ],
+      "owner_role": "Packaging and operations maintainer",
+      "review_trigger": "Review before publishing installation instructions, changing names/dependencies or expanding desktop-support claims."
+    }
+  ]
+}
