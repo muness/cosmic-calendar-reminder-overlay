@@ -8,6 +8,7 @@ calendars = ["eds-local/8f1f2c7e-opaque-backend-id"]
 
 [calendar]
 eds_enabled = false # opt in to the native EDS watcher; false never opens the account registry
+follow_selection = true # also require the calendar to be selected in Evolution; set false to use TOML selection alone
 
 [reminders]
 fallback_lead_minutes = 5 # 1 through 120
