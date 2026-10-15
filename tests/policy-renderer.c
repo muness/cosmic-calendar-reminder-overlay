@@ -18,6 +18,10 @@ main (void)
 	policy_changed = TRUE;
 	apply_policy_json (changed);
 	if (!policy_changed) return 4;
+	apply_policy_json ("{\"display\":{\"outputs\":\"all\",\"backend\":\"native\"},\"appearance\":{\"theme\":\"default\"},\"snooze\":{\"minutes\":[1,5]},\"presentation\":{\"enabled\":false}}");
+	if (renderer_presentation_enabled) return 8;
+	apply_policy_json ("{\"display\":{\"outputs\":\"all\",\"backend\":\"native\"},\"appearance\":{\"theme\":\"default\"},\"snooze\":{\"minutes\":[1,5]},\"presentation\":{\"enabled\":true}}");
+	if (!renderer_presentation_enabled) return 9;
 	ReminderUi ui = {0};
 	if (!on_arrival_key (NULL, GDK_KEY_Return, 0, 0, &ui)) return 5;
 	if (!on_arrival_key (NULL, GDK_KEY_space, 0, 0, &ui)) return 6;

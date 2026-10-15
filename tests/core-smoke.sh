@@ -47,11 +47,17 @@ EOF
 import json, pathlib, subprocess, sys
 cli, directory = sys.argv[1:]
 config = pathlib.Path(directory) / 'minimal.toml'
+override = pathlib.Path(directory) / 'override.toml'
 config.write_text('version = 1\n')
 policy = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', str(config), 'policy-json'], text=True))
 assert policy['audio'] == {'enabled': False, 'file': '', 'repeat_seconds': 0, 'volume': 0.5}, policy
-assert policy['calendar'] == {'eds_enabled': False}, policy
-override = pathlib.Path(directory) / 'override.toml'
+assert policy['calendar'] == {'eds_enabled': False, 'follow_selection': True}, policy
+override.write_text('version=1\n[calendar]\nfollow_selection=false\n')
+policy = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', str(override), 'policy-json'], text=True))
+assert policy['calendar'] == {'eds_enabled': False, 'follow_selection': False}, policy
+override.write_text('version=1\n[calendar]\nfollow_selection="false"\n')
+bad = subprocess.run(['/usr/bin/python3', cli, '--config', str(override), 'config-check'], capture_output=True, text=True)
+assert bad.returncode != 0, 'non-boolean follow_selection was accepted'
 override.write_text('version=1\n[calendar_overrides."eds-local/cal"]\nfallback_enabled=true\nfallback_lead_minutes=17\n')
 policy = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', str(override), 'policy-json'], text=True))
 assert policy['calendar_overrides']['eds-local/cal'] == {'fallback_enabled': True, 'fallback_lead_minutes': 17}, policy
@@ -109,10 +115,38 @@ connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 preview = connection.call_sync('org.muness.CalendarReminderOverlay.Core', '/org/muness/CalendarReminderOverlay/Core', 'org.muness.CalendarReminderOverlay.Core1', 'Get', GLib.Variant('(s)', ('json:accepted',)), GLib.VariantType.new('(sssstt)'), Gio.DBusCallFlags.NONE, 2000, None).unpack()
 assert preview == ('JSON input', '', '', 'active', 1, 0), preview
 diagnostics = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'diagnostics'], text=True))
-assert diagnostics == {'eds_enabled': False, 'registry_state': 'disabled', 'active_scans': 0, 'last_scan_unix': 0, 'calendars': []}, diagnostics
+assert diagnostics == {'eds_enabled': False, 'follow_selection': True, 'presentation_enabled': True, 'registry_state': 'disabled', 'active_scans': 0, 'last_scan_unix': 0, 'calendars': []}, diagnostics
 items = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'list'], text=True))
 owned = next(item for item in items if item['id'] == 'json:accepted')
 assert (owned['source_id'], owned['calendar_id'], owned['owner']) == ('fixture', 'selected', 'producer'), owned
+disabled = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'disable', '--json'], text=True, capture_output=True)
+assert disabled.returncode == 0 and json.loads(disabled.stdout) == {'accepted': True, 'enabled': False}, disabled.stderr
+assert json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'presentation-status', '--json'], text=True)) == {'enabled': False}
+import gi
+from gi.repository import Gio, GLib
+connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+policy = connection.call_sync('org.muness.CalendarReminderOverlay.Core','/org/muness/CalendarReminderOverlay/Core','org.muness.CalendarReminderOverlay.Core1','GetPolicy',None,GLib.VariantType.new('(s)'),Gio.DBusCallFlags.NONE,2000,None).unpack()[0]
+assert json.loads(policy)['presentation'] == {'enabled': False}, policy
+active_while_disabled = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'status', 'json:accepted'], text=True))
+assert active_while_disabled['state'] == 'active', active_while_disabled
+subprocess.run(['gdbus','call','--session','--dest','org.muness.CalendarReminderOverlay.Core','--object-path','/org/muness/CalendarReminderOverlay/Core','--method','org.muness.CalendarReminderOverlay.Core1.SetForeground','json:accepted'], check=True, stdout=subprocess.DEVNULL)
+PY
+[[ ! -e "$renderer_log" ]] || { echo "disabled presentation started the renderer" >&2; exit 1; }
+stop_core
+start_core
+/usr/bin/python3 - "$cli" "$config" <<'PRESENTATION'
+import json, subprocess, sys
+cli, config = sys.argv[1:]
+status = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'presentation-status', '--json'], text=True))
+assert status == {'enabled': False}, status
+active = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'status', 'json:accepted'], text=True))
+assert active['state'] == 'active', active
+enabled = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'enable', '--json'], text=True, capture_output=True)
+assert enabled.returncode == 0 and json.loads(enabled.stdout) == {'accepted': True, 'enabled': True}, enabled.stderr
+PRESENTATION
+/usr/bin/python3 - "$cli" "$config" <<'PYSEL'
+import json, pathlib, subprocess, sys
+cli, config = sys.argv[1:]
 unselected = pathlib.Path(config).with_name('unselected.toml')
 unselected.write_text('version=1\n[selection]\nmode="include"\ncalendars=[]\n')
 withdraw = subprocess.run(['/usr/bin/python3', cli, '--config', str(unselected), 'reload'], text=True, capture_output=True)
@@ -121,7 +155,7 @@ items = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config',
 assert next(item for item in items if item['id'] == 'json:accepted')['state'] == 'withdrawn', items
 restore = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'reload'], text=True, capture_output=True)
 assert restore.returncode == 0 and json.loads(restore.stdout)['reloaded'], restore.stderr
-PY
+PYSEL
 /usr/bin/python3 "$cli" --config "$config" notify renderer:armed Renderer >/dev/null
 sleep 1.2
 [[ ! -e "$renderer_log" ]] || { echo "headless core started a renderer before presentation was armed" >&2; exit 1; }

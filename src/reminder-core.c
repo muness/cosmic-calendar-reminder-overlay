@@ -23,6 +23,8 @@ static gchar *overlay_path;
 static gchar *policy_mode;
 static GHashTable *selected_calendars;
 static gboolean eds_enabled;
+static gboolean follow_calendar_selection = TRUE;
+static gboolean presentation_enabled = TRUE;
 static ESourceRegistry *eds_registry;
 static EReminderWatcher *eds_watcher;
 static GHashTable *native_reminders;
@@ -64,6 +66,7 @@ static void ensure_renderer (void);
 static void reset_renderer_retries (void);
 static gboolean any_eligible_calendar_alerts (void);
 static gboolean renderer_retry_cb (gpointer user_data);
+static void registry_source_changed (ESourceRegistry *registry, ESource *source, gpointer user_data);
 static const gchar introspection_xml[] =
   "<node><interface name='" IFACE "'>"
   "<method name='Submit'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='t' direction='in'/><arg type='t' direction='out'/></method>"
@@ -76,9 +79,12 @@ static const gchar introspection_xml[] =
   "<method name='ReloadPolicy'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='b' direction='out'/></method>"
   "<method name='StopAudio'></method>"
   "<method name='SetForeground'><arg type='s' direction='in'/></method>"
+  "<method name='GetPresentation'><arg type='b' direction='out'/></method>"
+  "<method name='SetPresentation'><arg type='b' direction='in'/><arg type='b' direction='out'/></method>"
   "<method name='GetPolicy'><arg type='s' direction='out'/></method>"
   "<method name='Diagnostics'><arg type='s' direction='out'/></method>"
   "<signal name='Changed'><arg type='s'/><arg type='t'/></signal>"
+  "<signal name='PresentationChanged'><arg type='b'/></signal>"
   "</interface></node>";
 
 static gboolean
@@ -124,6 +130,7 @@ load_policy (const gchar *path, const gchar *helper, GError **error)
 	audio_volume = json_object_get_double_member (audio, "volume");
 	audio_repeat_seconds = (guint) json_object_get_int_member (audio, "repeat_seconds");
 	eds_enabled = json_object_get_boolean_member (calendar, "eds_enabled");
+	follow_calendar_selection = json_object_get_boolean_member (calendar, "follow_selection");
 	JsonObject *reminders = json_object_get_object_member (object, "reminders");
 	fallback_lead_minutes = (guint) json_object_get_int_member (reminders, "fallback_lead_minutes");
 	g_free (validated_policy_json);
@@ -268,7 +275,7 @@ start_audio (void)
 	}
 	sqlite3_finalize (st);
 	g_free (id); g_free ((gchar *) source); g_free ((gchar *) calendar);
-	if (!enabled || audio_suppressed || !has_active_alerts ()) { g_free (file); return; }
+	if (!presentation_enabled || !enabled || audio_suppressed || !has_active_alerts ()) { g_free (file); return; }
 	if (!file || !*file) { g_free (file); file = ensure_default_tone (); }
 	if (!file) return;
 	if (audio_process) { g_free (file); return; }
@@ -302,6 +309,68 @@ source_selected (const gchar *source, const gchar *calendar)
 	result = g_str_equal (policy_mode, "all") || (g_str_equal (policy_mode, "include") && included) || (g_str_equal (policy_mode, "exclude") && !included);
 	g_free (key);
 	return result;
+}
+
+static gboolean
+calendar_source_selected (ESource *source)
+{
+	const gchar *uid;
+	ESourceSelectable *selectable;
+	gboolean enabled;
+	if (!source || !e_source_has_extension (source, E_SOURCE_EXTENSION_CALENDAR)) return FALSE;
+	/* Registry check includes disabled parent accounts, not only this calendar. */
+	enabled = eds_registry ? e_source_registry_check_enabled (eds_registry, source) : e_source_get_enabled (source);
+	if (!enabled) return FALSE;
+	uid = e_source_get_uid (source);
+	if (!source_selected ("eds-local", uid)) return FALSE;
+	if (!follow_calendar_selection) return TRUE;
+	selectable = E_SOURCE_SELECTABLE (e_source_get_extension (source, E_SOURCE_EXTENSION_CALENDAR));
+	return e_source_selectable_get_selected (selectable);
+}
+
+static gboolean
+calendar_uid_selected (const gchar *uid)
+{
+	ESource *source;
+	gboolean selected;
+	if (!eds_enabled || !eds_registry || !source_selected ("eds-local", uid)) return FALSE;
+	source = e_source_registry_ref_source (eds_registry, uid);
+	selected = calendar_source_selected (source);
+	g_clear_object (&source);
+	return selected;
+}
+
+static gboolean
+alert_presentable (const gchar *id)
+{
+	sqlite3_stmt *statement = NULL;
+	gboolean presentable = FALSE;
+	if (sqlite3_prepare_v2 (db, "SELECT source_id,calendar_id,owner,event_end FROM alerts WHERE id=? AND state='active'", -1, &statement, NULL) == SQLITE_OK) {
+		sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
+		if (sqlite3_step (statement) == SQLITE_ROW) {
+			const gchar *source = (const gchar *) sqlite3_column_text (statement, 0);
+			const gchar *calendar = (const gchar *) sqlite3_column_text (statement, 1);
+			const gchar *owner = (const gchar *) sqlite3_column_text (statement, 2);
+			gint64 end = sqlite3_column_int64 (statement, 3);
+			presentable = TRUE;
+			if (g_strcmp0 (source, "eds-local") == 0 &&
+			    (g_strcmp0 (owner, "native") == 0 || g_strcmp0 (owner, "fallback") == 0))
+				presentable = calendar_uid_selected (calendar) && (end <= 0 || end > (gint64) time (NULL));
+		}
+	}
+	sqlite3_finalize (statement);
+	return presentable;
+}
+
+static gboolean
+calendar_uid_may_retain_snapshot (const gchar *uid)
+{
+	if (!source_selected ("eds-local", uid)) return FALSE;
+	/* A registry outage leaves cached data stale, but cannot make it
+	 * presentable. Preserve it until the source's enabled/selected state is
+	 * known again. */
+	if (eds_enabled && follow_calendar_selection && !eds_registry) return TRUE;
+	return calendar_uid_selected (uid);
 }
 
 static gboolean
@@ -394,6 +463,9 @@ refresh_deadlines (void)
   sqlite3_bind_int64 (st, 1, now); sqlite3_bind_int64 (st, 2, now); sqlite3_step (st); sqlite3_finalize (st);
   st = NULL;
   sqlite3_prepare_v2 (db, "UPDATE alerts SET state='expired',revision=revision+1 WHERE state IN ('active','scheduled','snoozed') AND owner!='native' AND expires_at>0 AND expires_at<=?", -1, &st, NULL);
+  sqlite3_bind_int64 (st, 1, now); sqlite3_step (st); sqlite3_finalize (st);
+  st = NULL;
+  sqlite3_prepare_v2 (db, "UPDATE alerts SET state='expired',revision=revision+1 WHERE state IN ('active','scheduled','snoozed') AND owner='native' AND event_end>0 AND event_end<=?", -1, &st, NULL);
   sqlite3_bind_int64 (st, 1, now); sqlite3_step (st); sqlite3_finalize (st);
   st = NULL;
   sqlite3_prepare_v2 (db, "UPDATE alerts SET state='active',snooze_until=0,revision=revision+1 WHERE state='snoozed' AND owner!='native' AND snooze_until>0 AND snooze_until<=?", -1, &st, NULL);
@@ -563,7 +635,7 @@ native_reminder_triggered (EReminderWatcher *watcher, const GSList *reminders, g
 		if (!source_uid || !component || !instance) continue;
 		reset_renderer_retries ();
 		source = e_source_registry_ref_source (eds_registry, source_uid);
-		if (!source || !e_source_has_extension (source, E_SOURCE_EXTENSION_CALENDAR) || !source_selected ("eds-local", source_uid)) {
+		if (!calendar_source_selected (source) || g_strcmp0 (e_source_get_uid (source), source_uid) != 0) {
 			g_clear_object (&source);
 			continue;
 		}
@@ -633,7 +705,8 @@ restore_native_reminder_pointers (void)
 	for (link = snoozed; link; link = link->next) {
 		EReminderData *reminder = link->data;
 		gchar *id = native_reminder_id (reminder), *source_id = id ? read_source_id (id) : NULL;
-		if (id && g_strcmp0 (source_id, "eds-local") == 0)
+		const gchar *uid = e_reminder_data_get_source_uid (reminder);
+		if (id && g_strcmp0 (source_id, "eds-local") == 0 && calendar_uid_selected (uid))
 			g_hash_table_replace (native_reminders, g_strdup (id), e_reminder_data_copy (reminder));
 		g_free (source_id);
 		g_free (id);
@@ -692,6 +765,7 @@ typedef struct {
 	guint timeout_source;
 	gboolean for_every_event;
 	gboolean scan_again;
+	gboolean invalidated;
 } EdsScan;
 
 static void
@@ -753,7 +827,7 @@ apply_cached_fallback_policy (void)
 			gboolean enabled = FALSE;
 			guint lead = fallback_lead_minutes;
 			calendar_policy (calendar, &enabled, &lead);
-			if (!source_selected ("eds-local", calendar) || !enabled || start <= 0 || end <= now) {
+			if (!calendar_uid_may_retain_snapshot (calendar) || !enabled || start <= 0 || end <= now) {
 				g_ptr_array_add (changes, g_strdup_printf ("%s\twithdrawn\t0", id));
 				continue;
 			}
@@ -825,7 +899,7 @@ clear_unselected_occurrence_snapshots (void)
 	if (sqlite3_prepare_v2 (db, "SELECT DISTINCT calendar_id FROM eds_occurrences", -1, &statement, NULL) == SQLITE_OK) {
 		while (sqlite3_step (statement) == SQLITE_ROW) {
 			const gchar *calendar = (const gchar *) sqlite3_column_text (statement, 0);
-			if (!source_selected ("eds-local", calendar)) g_ptr_array_add (calendars, g_strdup (calendar));
+			if (!calendar_uid_may_retain_snapshot (calendar)) g_ptr_array_add (calendars, g_strdup (calendar));
 		}
 	}
 	sqlite3_finalize (statement);
@@ -899,7 +973,7 @@ eds_parse_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	EdsScan *scan = user_data;
 	GError *error = NULL;
 	GPtrArray *events = g_task_propagate_pointer (G_TASK (result), &error);
-	if (events && eds_enabled && source_selected ("eds-local", scan->source_uid)) {
+	if (events && !scan->invalidated && eds_enabled && calendar_source_selected (scan->source)) {
 		gboolean fallback_enabled;
 		guint lead_minutes;
 		calendar_policy (scan->source_uid, &fallback_enabled, &lead_minutes);
@@ -912,7 +986,7 @@ eds_parse_done (GObject *source, GAsyncResult *result, gpointer user_data)
 			restore_native_reminder_pointers ();
 		}
 	}
-	if (error && eds_enabled && source_selected ("eds-local", scan->source_uid)) {
+	if (error && !scan->invalidated && eds_enabled && calendar_source_selected (scan->source)) {
 		g_warning ("Could not reconcile EDS calendar %s; retaining last successful snapshot: %s", scan->source_uid, error->message);
 		reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error->message, NULL);
 	}
@@ -931,6 +1005,11 @@ eds_fetch_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	gboolean parsing = FALSE;
 	if (e_cal_client_get_object_list_as_comps_finish (E_CAL_CLIENT (source), result, &components, &error)) {
 		if (scan->timeout_source) { g_source_remove (scan->timeout_source); scan->timeout_source = 0; }
+		if (scan->invalidated) {
+			g_slist_free_full (components, g_object_unref);
+			eds_scan_finish (scan);
+			return;
+		}
 		gchar *ical = calendar_snapshot_to_ical (components);
 		if (!ical) {
 			g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "EDS returned an event that could not be serialized");
@@ -966,7 +1045,7 @@ eds_fetch_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	if (!error && !parsing)
 		g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "EDS returned no usable calendar snapshot; preserving the previous snapshot");
 	if (error) {
-		if (eds_enabled && source_selected ("eds-local", scan->source_uid))
+		if (!scan->invalidated && eds_enabled && calendar_source_selected (scan->source))
 			reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error->message, NULL);
 		eds_scan_finish (scan);
 	}
@@ -981,7 +1060,7 @@ eds_connect_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	GError *error = NULL;
 	EClient *client = e_cal_client_connect_finish (result, &error);
 	if (!client) {
-		if (eds_enabled && source_selected ("eds-local", scan->source_uid))
+		if (!scan->invalidated && eds_enabled && calendar_source_selected (scan->source))
 			reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error ? error->message : "EDS connection failed", NULL);
 		g_warning ("Could not connect to EDS calendar %s; retaining last successful snapshot: %s", scan->source_uid, error ? error->message : "unknown error");
 		g_clear_error (&error);
@@ -989,6 +1068,7 @@ eds_connect_done (GObject *source, GAsyncResult *result, gpointer user_data)
 		return;
 	}
 	scan->client = E_CAL_CLIENT (client);
+	if (scan->invalidated) { eds_scan_finish (scan); return; }
 	e_cal_client_get_object_list_as_comps (scan->client, "#t", scan->cancellable, eds_fetch_done, scan);
 	(void) source;
 }
@@ -998,7 +1078,7 @@ scan_source (ESource *source)
 {
 	const gchar *uid = e_source_get_uid (source);
 	EdsScan *scan;
-	if (!eds_enabled || !eds_registry || !uid || !e_source_get_enabled (source) || !source_selected ("eds-local", uid)) return;
+	if (!eds_enabled || !eds_registry || !uid || !calendar_source_selected (source)) return;
 	if (eds_scans && g_hash_table_contains (eds_scans, uid)) { ((EdsScan *) g_hash_table_lookup (eds_scans, uid))->scan_again = TRUE; return; }
 	scan = g_new0 (EdsScan, 1);
 	scan->source_uid = g_strdup (uid);
@@ -1020,7 +1100,11 @@ scan_selected_calendars (void)
 	GList *sources;
 	if (!eds_enabled || !eds_registry) return;
 	sources = e_source_registry_list_sources (eds_registry, E_SOURCE_EXTENSION_CALENDAR);
-	for (GList *link = sources; link; link = link->next) scan_source (link->data);
+	for (GList *link = sources; link; link = link->next) {
+		ESource *source = link->data;
+		if (calendar_source_selected (source)) scan_source (source);
+		else registry_source_changed (eds_registry, source, NULL);
+	}
 	g_list_free_full (sources, g_object_unref);
 }
 
@@ -1028,12 +1112,24 @@ static void
 registry_source_changed (ESourceRegistry *registry, ESource *source, gpointer user_data)
 {
 	(void) registry; (void) user_data;
-	if (e_source_get_enabled (source) && source_selected ("eds-local", e_source_get_uid (source))) scan_source (source);
-	else if (!e_source_get_enabled (source) || !source_selected ("eds-local", e_source_get_uid (source))) {
+	if (calendar_source_selected (source)) {
+		scan_source (source);
+		restore_native_reminder_pointers ();
+	}
+	else {
 		const gchar *uid = e_source_get_uid (source);
+		EdsScan *pending = eds_scans ? g_hash_table_lookup (eds_scans, uid) : NULL;
+		if (pending) {
+			pending->invalidated = TRUE;
+			g_cancellable_cancel (pending->cancellable);
+		}
 		clear_occurrence_snapshot (uid);
-		calendar_sync_state (uid, !e_source_get_enabled (source) ? "disabled" : "not-selected",
-			!e_source_get_enabled (source) ? "calendar source is disabled" : "calendar is excluded by source-selection policy");
+		gboolean enabled = eds_registry ? e_source_registry_check_enabled (eds_registry, source) : e_source_get_enabled (source);
+		calendar_sync_state (uid, !enabled ? "disabled" : "not-selected",
+			!enabled ? "calendar source or parent account is disabled" :
+			(follow_calendar_selection && e_source_has_extension (source, E_SOURCE_EXTENSION_CALENDAR) &&
+			 !e_source_selectable_get_selected (E_SOURCE_SELECTABLE (e_source_get_extension (source, E_SOURCE_EXTENSION_CALENDAR))) ?
+			 "calendar is not selected in Evolution" : "calendar is excluded by source-selection policy"));
 		sqlite3_stmt *statement = NULL;
 		if (sqlite3_prepare_v2 (db, "UPDATE alerts SET state='withdrawn',revision=revision+1 WHERE source_id='eds-local' AND calendar_id=? AND state IN ('active','scheduled','snoozed')", -1, &statement, NULL) == SQLITE_OK) {
 			sqlite3_bind_text (statement, 1, uid, -1, SQLITE_TRANSIENT); sqlite3_step (statement);
@@ -1064,7 +1160,7 @@ static void
 registry_source_enabled (ESourceRegistry *registry, ESource *source, gpointer user_data)
 {
 	(void) registry; (void) user_data;
-	if (source_selected ("eds-local", e_source_get_uid (source))) scan_source (source);
+	if (calendar_source_selected (source)) scan_source (source);
 }
 
 static gboolean
@@ -1186,10 +1282,11 @@ any_eligible_calendar_alerts (void)
 {
 	sqlite3_stmt *statement = NULL;
 	gboolean found = FALSE;
-	if (sqlite3_prepare_v2 (db, "SELECT calendar_id FROM alerts WHERE source_id='eds-local' AND owner IN ('native','fallback') AND state='active'", -1, &statement, NULL) == SQLITE_OK) {
+	if (sqlite3_prepare_v2 (db, "SELECT calendar_id FROM alerts WHERE source_id='eds-local' AND owner IN ('native','fallback') AND state='active' AND (event_end<=0 OR event_end>?)", -1, &statement, NULL) == SQLITE_OK) {
+		sqlite3_bind_int64 (statement, 1, (gint64) time (NULL));
 		while (sqlite3_step (statement) == SQLITE_ROW) {
 			const gchar *calendar = (const gchar *) sqlite3_column_text (statement, 0);
-			if (eds_enabled && source_selected ("eds-local", calendar)) { found = TRUE; break; }
+			if (eds_enabled && calendar_uid_selected (calendar)) { found = TRUE; break; }
 		}
 	}
 	sqlite3_finalize (statement);
@@ -1200,6 +1297,7 @@ static gboolean
 renderer_should_run (void)
 {
 	gboolean armed_active = FALSE;
+	if (!presentation_enabled) return FALSE;
 	if (presented_alerts) {
 		GHashTableIter iter;
 		gpointer id;
@@ -1214,6 +1312,23 @@ renderer_should_run (void)
 		}
 	}
 	return overlay_path && *overlay_path && (any_eligible_calendar_alerts () || armed_active);
+}
+
+static gchar *
+effective_policy_json (void)
+{
+	JsonNode *copy = validated_policy_node ? json_node_copy (validated_policy_node) : json_node_new (JSON_NODE_OBJECT);
+	JsonObject *root = json_node_get_object (copy);
+	JsonObject *presentation = json_object_new ();
+	JsonGenerator *generator = json_generator_new ();
+	gchar *json;
+	json_object_set_boolean_member (presentation, "enabled", presentation_enabled);
+	json_object_set_object_member (root, "presentation", presentation);
+	json_generator_set_root (generator, copy);
+	json = json_generator_to_data (generator, NULL);
+	g_object_unref (generator);
+	json_node_unref (copy);
+	return json;
 }
 
 static void
@@ -1327,6 +1442,8 @@ diagnostics_json (void)
 	sqlite3_finalize (st); st = NULL;
 	json_builder_begin_object (builder);
 	json_builder_set_member_name (builder, "eds_enabled"); json_builder_add_boolean_value (builder, eds_enabled);
+	json_builder_set_member_name (builder, "follow_selection"); json_builder_add_boolean_value (builder, follow_calendar_selection);
+	json_builder_set_member_name (builder, "presentation_enabled"); json_builder_add_boolean_value (builder, presentation_enabled);
 	json_builder_set_member_name (builder, "registry_state");
 	json_builder_add_string_value (builder, !eds_enabled ? "disabled" : (eds_registry ? "ready" : (eds_starting ? "starting" : "unavailable")));
 	json_builder_set_member_name (builder, "active_scans"); json_builder_add_int_value (builder, eds_scans ? g_hash_table_size (eds_scans) : 0);
@@ -1337,7 +1454,7 @@ diagnostics_json (void)
 			const gchar *calendar_id = (const gchar *) sqlite3_column_text (st, 0);
 			json_builder_begin_object (builder);
 			json_builder_set_member_name (builder, "calendar_id"); json_builder_add_string_value (builder, calendar_id);
-			json_builder_set_member_name (builder, "selected"); json_builder_add_boolean_value (builder, eds_enabled && source_selected ("eds-local", calendar_id));
+			json_builder_set_member_name (builder, "selected"); json_builder_add_boolean_value (builder, eds_enabled && calendar_uid_selected (calendar_id));
 			json_builder_set_member_name (builder, "state"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 1));
 			json_builder_set_member_name (builder, "last_success_unix"); json_builder_add_int_value (builder, sqlite3_column_int64 (st, 2));
 			json_builder_set_member_name (builder, "error"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 3));
@@ -1580,6 +1697,12 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
   } else if (g_str_equal (method, "List")) {
     sqlite3_stmt *st = NULL; GString *list = g_string_new ("["); gboolean first = TRUE; refresh_deadlines ();
     if (sqlite3_prepare_v2 (db, "SELECT id,title,body,destination,state,action,payload,revision,expires_at,snooze_until,action_revision,source_id,calendar_id,event_start,event_end,occurrence,owner FROM alerts ORDER BY id", -1, &st, NULL) == SQLITE_OK) while (sqlite3_step (st) == SQLITE_ROW) {
+	  const gchar *source = (const gchar *) sqlite3_column_text (st, 11);
+	  const gchar *calendar = (const gchar *) sqlite3_column_text (st, 12);
+	  const gchar *owner = (const gchar *) sqlite3_column_text (st, 16);
+	  gint64 event_end = sqlite3_column_int64 (st, 14);
+	  if (g_strcmp0 (source, "eds-local") == 0 && (g_strcmp0 (owner, "native") == 0 || g_strcmp0 (owner, "fallback") == 0) &&
+	      (!calendar_uid_selected (calendar) || (event_end > 0 && event_end <= (gint64) time (NULL)))) continue;
       gchar *item = row_json (st); if (!first) g_string_append_c (list, ','); g_string_append (list, item); g_free (item); first = FALSE;
     }
     sqlite3_finalize (st); g_string_append_c (list, ']'); g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", list->str)); g_string_free (list, TRUE);
@@ -1597,7 +1720,8 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 			while (sqlite3_step (rows) == SQLITE_ROW) {
 				const gchar *source = (const gchar *) sqlite3_column_text (rows, 1);
 				const gchar *calendar = (const gchar *) sqlite3_column_text (rows, 2);
-				if (!source_selected (source, calendar)) g_ptr_array_add (withdraw, g_strdup ((const gchar *) sqlite3_column_text (rows, 0)));
+				if (g_str_equal (source, "eds-local") ? !calendar_uid_may_retain_snapshot (calendar) : !source_selected (source, calendar))
+					g_ptr_array_add (withdraw, g_strdup ((const gchar *) sqlite3_column_text (rows, 0)));
 			}
 		}
 		sqlite3_finalize (rows);
@@ -1613,7 +1737,7 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 			g_hash_table_iter_init (&iter, native_reminders);
 			while (g_hash_table_iter_next (&iter, &key, &value)) {
 				const gchar *uid = e_reminder_data_get_source_uid (value);
-				if (!source_selected ("eds-local", uid)) g_hash_table_iter_remove (&iter);
+				if (!calendar_uid_selected (uid)) g_hash_table_iter_remove (&iter);
 			}
 		}
 		if (foreground_id) { gchar *state = NULL; if (!read_one (foreground_id, NULL, &state, NULL, NULL, NULL) || !g_str_equal (state, "active")) { stop_audio (); g_clear_pointer (&foreground_id, g_free); } g_free (state); }
@@ -1637,28 +1761,58 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
 	} else if (g_str_equal (method, "SetForeground")) {
 		const gchar *next_id;
 		g_variant_get (parameters, "(&s)", &next_id);
-		if (!next_id || !*next_id) {
+		if (!presentation_enabled || !next_id || !*next_id) {
 			g_clear_pointer (&foreground_id, g_free);
 			stop_audio ();
 		} else {
 			gchar *state = NULL;
-			if (read_one (next_id, NULL, &state, NULL, NULL, NULL) && g_str_equal (state, "active") && g_strcmp0 (foreground_id, next_id) != 0) {
+			if (read_one (next_id, NULL, &state, NULL, NULL, NULL) && g_str_equal (state, "active") && alert_presentable (next_id) && g_strcmp0 (foreground_id, next_id) != 0) {
 				reset_renderer_retries ();
 				g_free (foreground_id);
 				foreground_id = g_strdup (next_id);
 				reset_audio_for_new_alert ();
 				start_audio ();
 			}
-			if (state && g_str_equal (state, "active")) {
+			if (state && g_str_equal (state, "active") && alert_presentable (next_id)) {
 				if (!presented_alerts) presented_alerts = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
 				g_hash_table_add (presented_alerts, g_strdup (next_id));
 				ensure_renderer ();
 			}
+			else if (state && g_str_equal (state, "active") && g_strcmp0 (foreground_id, next_id) == 0) {
+				stop_audio ();
+				g_clear_pointer (&foreground_id, g_free);
+			}
 			g_free (state);
 		}
 		g_dbus_method_invocation_return_value (invocation, NULL);
+	} else if (g_str_equal (method, "GetPresentation")) {
+		g_dbus_method_invocation_return_value (invocation, g_variant_new ("(b)", presentation_enabled));
+	} else if (g_str_equal (method, "SetPresentation")) {
+		gboolean enabled, accepted = FALSE;
+		sqlite3_stmt *statement = NULL;
+		g_variant_get (parameters, "(b)", &enabled);
+		if (sqlite3_prepare_v2 (db, "INSERT INTO app_settings(key,value) VALUES('presentation_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", -1, &statement, NULL) == SQLITE_OK) {
+			sqlite3_bind_text (statement, 1, enabled ? "1" : "0", -1, SQLITE_STATIC);
+			accepted = sqlite3_step (statement) == SQLITE_DONE;
+		}
+		sqlite3_finalize (statement);
+		if (accepted && presentation_enabled != enabled) {
+			presentation_enabled = enabled;
+			refresh_deadlines ();
+			if (!enabled) {
+				stop_audio ();
+				g_clear_pointer (&foreground_id, g_free);
+			} else {
+				reset_renderer_retries ();
+				ensure_renderer ();
+			}
+			g_dbus_connection_emit_signal (connection, NULL, OBJECT_PATH, IFACE, "PresentationChanged", g_variant_new ("(b)", enabled), NULL);
+		}
+		g_dbus_method_invocation_return_value (invocation, g_variant_new ("(b)", accepted));
 	} else if (g_str_equal (method, "GetPolicy")) {
-		g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", validated_policy_json ? validated_policy_json : "{}"));
+		gchar *effective = effective_policy_json ();
+		g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", effective));
+		g_free (effective);
 	} else if (g_str_equal (method, "Diagnostics")) {
 		gchar *json = diagnostics_json ();
 		g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", json));
@@ -1695,6 +1849,11 @@ int main (int argc, char **argv)
   }
   if (sqlite3_open (state_path, &db) != SQLITE_OK) { g_printerr ("open state db: %s\n", sqlite3_errmsg (db)); return 1; }
   sqlite3_busy_timeout (db, 5000); sqlite3_exec (db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;", NULL, NULL, NULL);
+  if (!exec_sql ("CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT OR IGNORE INTO app_settings(key,value) VALUES('presentation_enabled','1');", &error)) { g_printerr ("settings schema: %s\n", error->message); return 1; }
+  sqlite3_stmt *presentation_statement = NULL;
+  if (sqlite3_prepare_v2 (db, "SELECT value FROM app_settings WHERE key='presentation_enabled'", -1, &presentation_statement, NULL) == SQLITE_OK && sqlite3_step (presentation_statement) == SQLITE_ROW)
+    presentation_enabled = g_strcmp0 ((const gchar *) sqlite3_column_text (presentation_statement, 0), "0") != 0;
+  sqlite3_finalize (presentation_statement);
   if (!exec_sql ("CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,destination TEXT NOT NULL,state TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,revision INTEGER NOT NULL,expires_at INTEGER NOT NULL,snooze_until INTEGER NOT NULL,action_revision INTEGER NOT NULL DEFAULT 0,source_id TEXT NOT NULL DEFAULT '',calendar_id TEXT NOT NULL DEFAULT '',event_start INTEGER NOT NULL DEFAULT 0,event_end INTEGER NOT NULL DEFAULT 0,occurrence TEXT NOT NULL DEFAULT '',owner TEXT NOT NULL DEFAULT 'producer',trigger_at INTEGER NOT NULL DEFAULT 0);", &error)) { g_printerr ("state schema: %s\n", error->message); return 1; }
 	if (!exec_sql ("CREATE TABLE IF NOT EXISTS calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT NOT NULL,last_success_unix INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',event_count INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT NOT NULL,event_uid TEXT NOT NULL,recurrence_id TEXT NOT NULL,event_start INTEGER NOT NULL,event_end INTEGER NOT NULL,native_alarm INTEGER NOT NULL);", &error)) { g_printerr ("calendar diagnostics schema: %s\n", error->message); return 1; }
   sqlite3_stmt *columns = NULL;
