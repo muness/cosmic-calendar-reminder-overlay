@@ -68,6 +68,11 @@ start_core() {
 }
 stop_core() { kill "$daemon"; wait "$daemon" 2>/dev/null || true; daemon=""; }
 status() { /usr/bin/python3 "$cli" --config "$config" status "$1"; }
+foreground() {
+  gdbus call --session --dest org.muness.CalendarReminderOverlay.Core \
+    --object-path /org/muness/CalendarReminderOverlay/Core \
+    --method org.muness.CalendarReminderOverlay.Core1.SetForeground "$1" >/dev/null
+}
 assert_state() {
   local got
   got="$(status "$1" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')"
@@ -76,7 +81,7 @@ assert_state() {
 
 start_core
 /usr/bin/python3 - "$cli" "$config" <<'PY'
-import json, subprocess, sys
+import json, pathlib, subprocess, sys
 cli, config = sys.argv[1:]
 accepted = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'notify', '--json'], input=json.dumps({'id':'json:accepted','title':'JSON input','source_id':'fixture','calendar_id':'selected'}), text=True, capture_output=True)
 assert accepted.returncode == 0, accepted.stderr
@@ -87,6 +92,19 @@ from gi.repository import Gio, GLib
 connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
 preview = connection.call_sync('org.muness.CalendarReminderOverlay.Core', '/org/muness/CalendarReminderOverlay/Core', 'org.muness.CalendarReminderOverlay.Core1', 'Get', GLib.Variant('(s)', ('json:accepted',)), GLib.VariantType.new('(sssstt)'), Gio.DBusCallFlags.NONE, 2000, None).unpack()
 assert preview == ('JSON input', '', '', 'active', 1, 0), preview
+diagnostics = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'diagnostics'], text=True))
+assert diagnostics == {'eds_enabled': False, 'last_scan_unix': 0, 'calendars': []}, diagnostics
+items = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'list'], text=True))
+owned = next(item for item in items if item['id'] == 'json:accepted')
+assert (owned['source_id'], owned['calendar_id'], owned['owner']) == ('fixture', 'selected', 'producer'), owned
+unselected = pathlib.Path(config).with_name('unselected.toml')
+unselected.write_text('version=1\n[selection]\nmode="include"\ncalendars=[]\n')
+withdraw = subprocess.run(['/usr/bin/python3', cli, '--config', str(unselected), 'reload'], text=True, capture_output=True)
+assert withdraw.returncode == 0 and json.loads(withdraw.stdout)['reloaded'], withdraw.stderr
+items = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', config, 'list'], text=True))
+assert next(item for item in items if item['id'] == 'json:accepted')['state'] == 'withdrawn', items
+restore = subprocess.run(['/usr/bin/python3', cli, '--config', config, 'reload'], text=True, capture_output=True)
+assert restore.returncode == 0 and json.loads(restore.stdout)['reloaded'], restore.stderr
 PY
 /usr/bin/python3 "$cli" --config "$config" notify timer:tea Tea --body "boil water" >/dev/null
 [[ "$(/usr/bin/python3 "$cli" --config "$config" act timer:tea 1 snooze --minutes 10080 | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')" == accepted ]]
@@ -153,13 +171,27 @@ PYTEST
 /usr/bin/python3 - "$state" <<'PYOWNER'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
-db.execute("UPDATE alerts SET source_id='eds-local',calendar_id='fixture',state='snoozed',snooze_until=1 WHERE id='eds:orphan'")
+db.execute("UPDATE alerts SET source_id='eds-local',calendar_id='fixture',owner='native',state='snoozed',snooze_until=1 WHERE id='eds:orphan'")
 db.commit()
 PYOWNER
 assert_state eds:orphan snoozed
+if /usr/bin/python3 "$cli" --config "$config" update eds:orphan "Must not replace provider state" >/dev/null 2>&1; then
+  echo "producer update replaced a native-owned alert" >&2; exit 1
+fi
 orphan_revision="$(status eds:orphan | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["revision"])')"
 [[ "$(/usr/bin/python3 "$cli" --config "$config" act eds:orphan "$orphan_revision" dismiss | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["result"])')" == failed ]]
 [[ "$(/usr/bin/python3 "$cli" --config "$config" cancel eds:orphan | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["cancelled"])')" == False ]]
+stop_core
+# Upgrade a group-2a database: native rows must not become locally scheduled.
+/usr/bin/python3 - "$state" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute('ALTER TABLE alerts DROP COLUMN owner')
+db.commit()
+PY
+start_core
+assert_state eds:orphan snoozed
+[[ "$(status eds:orphan | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["owner"])')" == native ]]
 stop_core
 cat >"$tmp/pw-play-stub" <<'EOF'
 #!/bin/sh
@@ -186,6 +218,7 @@ export REMINDER_PLAYBACK_PROGRAM="$tmp/pw-play-stub"
 export REMINDER_AUDIO_LOG="$tmp/audio.log"
 export REMINDER_AUDIO_PID="$tmp/audio.pid"
 export REMINDER_AUDIO_MODE=short
+: >"$tmp/audio.log"
 "$core" --headless --state "$tmp/audio.sqlite3" --config "$tmp/audio.toml" --helper "$cli" >"$tmp/audio-core.log" 2>&1 &
 daemon=$!
 for _ in {1..40}; do
@@ -193,9 +226,17 @@ for _ in {1..40}; do
   sleep .05
 done
 /usr/bin/python3 "$cli" --config "$tmp/audio.toml" notify audio:repeat Sound >/dev/null
+sleep .2
+[[ ! -s "$tmp/audio.log" ]] || { echo "invisible alert played audio before foreground admission" >&2; exit 1; }
+foreground audio:repeat
 for _ in {1..40}; do [[ "$(wc -l <"$tmp/audio.log" 2>/dev/null || echo 0)" -ge 2 ]] && break; sleep .1; done
 [[ "$(wc -l <"$tmp/audio.log")" -ge 2 ]] || { echo "configured repeat did not launch a second playback" >&2; cat "$tmp/audio-core.log" >&2; exit 1; }
 grep -q -- '--volume 0.250' "$tmp/audio.log" || { echo "configured volume was not passed to playback" >&2; exit 1; }
+/usr/bin/python3 "$cli" --config "$tmp/audio.toml" notify audio:hidden Hidden >/dev/null
+/usr/bin/python3 "$cli" --config "$tmp/audio.toml" cancel audio:hidden >/dev/null
+previous_plays="$(wc -l <"$tmp/audio.log")"
+for _ in {1..40}; do [[ "$(wc -l <"$tmp/audio.log")" -gt "$previous_plays" ]] && break; sleep .1; done
+[[ "$(wc -l <"$tmp/audio.log")" -gt "$previous_plays" ]] || { echo "cancelling a hidden alert muted the foreground alert" >&2; exit 1; }
 stop_core
 cat >"$tmp/audio-once.toml" <<EOF
 version = 1
@@ -217,6 +258,7 @@ for _ in {1..40}; do
   sleep .05
 done
 /usr/bin/python3 "$cli" --config "$tmp/audio-once.toml" notify audio:once Once >/dev/null
+foreground audio:once
 sleep 2.2
 [[ "$(wc -l <"$tmp/audio.log")" -eq 1 ]] || { echo "one-shot audio replayed during active alert" >&2; exit 1; }
 /usr/bin/python3 "$cli" --config "$tmp/audio-once.toml" update audio:once "Updated title" >/dev/null
@@ -224,6 +266,8 @@ sleep 2.2
 [[ "$(wc -l <"$tmp/audio.log")" -eq 1 ]] || { echo "expired or updated alert restarted one-shot playback" >&2; exit 1; }
 [[ "$(/usr/bin/python3 "$cli" --config "$tmp/audio-once.toml" status audio:expired | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])')" == expired ]]
 gdbus call --session --dest org.muness.CalendarReminderOverlay.Core --object-path /org/muness/CalendarReminderOverlay/Core --method org.muness.CalendarReminderOverlay.Core1.StopAudio >/dev/null
+foreground audio:once
+foreground audio:once
 sleep 2.2
 [[ "$(wc -l <"$tmp/audio.log")" -eq 1 ]] || { echo "StopAudio restarted while alert remained active" >&2; exit 1; }
 stop_core
@@ -235,6 +279,7 @@ for _ in {1..40}; do
   sleep .05
 done
 /usr/bin/python3 "$cli" --config "$tmp/audio.toml" notify audio:stop Sound >/dev/null
+foreground audio:stop
 for _ in {1..40}; do [[ -s "$tmp/audio.pid" ]] && break; sleep .05; done
 audio_pid="$(cat "$tmp/audio.pid")"
 [[ -n "$audio_pid" ]] || { echo "blocking playback stub did not start" >&2; exit 1; }
@@ -243,6 +288,7 @@ for _ in {1..40}; do kill -0 "$audio_pid" 2>/dev/null || break; sleep .05; done
 if kill -0 "$audio_pid" 2>/dev/null; then echo "snooze did not stop active playback" >&2; exit 1; fi
 : >"$tmp/audio.pid"
 /usr/bin/python3 "$cli" --config "$tmp/audio.toml" notify audio:shutdown Shutdown >/dev/null
+foreground audio:shutdown
 for _ in {1..40}; do [[ -s "$tmp/audio.pid" ]] && break; sleep .05; done
 shutdown_audio_pid="$(cat "$tmp/audio.pid")"
 [[ -n "$shutdown_audio_pid" ]] || { echo "shutdown playback stub did not start" >&2; exit 1; }
