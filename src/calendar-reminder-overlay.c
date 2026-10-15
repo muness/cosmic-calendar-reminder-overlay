@@ -17,6 +17,7 @@ typedef struct {
 	gint64 event_start;
 	gboolean finished;
 	gboolean pending_action;
+	gboolean keyboard_actions_armed;
 	guint64 generation;
 	gboolean local;
 	guint64 local_revision;
@@ -153,8 +154,19 @@ apply_policy_json (const gchar *json)
 		g_debug ("Renderer policy is invalid: %s", error ? error->message : "invalid JSON");
 		g_clear_error (&error); g_object_unref (parser); return;
 	}
-	policy_changed = current_policy == NULL ||
-		!json_node_equal (current_policy, json_parser_get_root (parser));
+	JsonNode *incoming = json_parser_get_root (parser);
+	if (current_policy && json_node_equal (current_policy, incoming)) {
+		g_object_unref (parser);
+		return;
+	}
+	gboolean layout_changed = current_policy == NULL;
+	const gchar *layout_keys[] = { "display", "snooze", "calendar_overrides" };
+	for (guint i = 0; current_policy && i < G_N_ELEMENTS (layout_keys); i++) {
+		JsonNode *before = json_object_get_member (json_node_get_object (current_policy), layout_keys[i]);
+		JsonNode *after = json_object_get_member (json_node_get_object (incoming), layout_keys[i]);
+		if (before != after && (!before || !after || !json_node_equal (before, after))) layout_changed = TRUE;
+	}
+	policy_changed |= layout_changed;
 	g_clear_pointer (&current_policy, json_node_unref);
 	current_policy = json_node_copy (json_parser_get_root (parser));
 	JsonObject *root = json_node_get_object (current_policy);
@@ -231,6 +243,21 @@ on_close_request (GtkWindow *window, gpointer user_data)
 	(void) window;
 	gtk_label_set_text (ui->status, "Use Dismiss or a Snooze button to resolve this reminder.");
 	return TRUE;
+}
+
+/* Arrival must not turn typing in the previous app into a button action. */
+static gboolean
+on_arrival_key (GtkEventControllerKey *controller, guint keyval, guint keycode,
+                GdkModifierType state, gpointer user_data)
+{
+	ReminderUi *ui = user_data;
+	(void) controller; (void) keycode; (void) state;
+	if (keyval == GDK_KEY_Tab || keyval == GDK_KEY_ISO_Left_Tab)
+		ui->keyboard_actions_armed = TRUE;
+	if (!ui->keyboard_actions_armed &&
+	    (keyval == GDK_KEY_Return || keyval == GDK_KEY_KP_Enter || keyval == GDK_KEY_space))
+		return TRUE;
+	return FALSE;
 }
 
 static void
@@ -382,6 +409,10 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_window_set_decorated (ui->window, FALSE);
 	gtk_window_set_resizable (ui->window, TRUE);
 	g_signal_connect (ui->window, "close-request", G_CALLBACK (on_close_request), ui);
+	GtkEventController *arrival_keys = gtk_event_controller_key_new ();
+	gtk_event_controller_set_propagation_phase (arrival_keys, GTK_PHASE_CAPTURE);
+	g_signal_connect (arrival_keys, "key-pressed", G_CALLBACK (on_arrival_key), ui);
+	gtk_widget_add_controller (GTK_WIDGET (ui->window), arrival_keys);
 
 	outer = gtk_box_new (GTK_ORIENTATION_VERTICAL, 28);
 	gtk_widget_add_css_class (outer, "reminder-overlay");
@@ -408,7 +439,7 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_widget_set_size_request (content, 0, -1);
 	gtk_widget_set_size_request (center, 0, -1);
 	gtk_widget_set_hexpand (content, TRUE);
-	gtk_widget_set_halign (content, GTK_ALIGN_CENTER);
+	gtk_widget_set_halign (content, GTK_ALIGN_FILL);
 	gtk_widget_set_valign (content, GTK_ALIGN_CENTER);
 	title = gtk_label_new (summary && *summary ? summary : "Calendar reminder");
 	gtk_widget_add_css_class (title, "reminder-title");
@@ -452,7 +483,7 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	primary_buttons = gtk_flow_box_new ();
 	gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (primary_buttons), GTK_SELECTION_NONE);
 	gtk_flow_box_set_homogeneous (GTK_FLOW_BOX (primary_buttons), TRUE);
-	gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (primary_buttons), 4);
+	gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (primary_buttons), 2);
 	gtk_flow_box_set_column_spacing (GTK_FLOW_BOX (primary_buttons), 18);
 	gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (primary_buttons), 18);
 	GtkWidget *primary_heading = gtk_label_new ("Meeting actions");
@@ -475,7 +506,7 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	snooze_buttons = gtk_flow_box_new ();
 	gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (snooze_buttons), GTK_SELECTION_NONE);
 	gtk_flow_box_set_homogeneous (GTK_FLOW_BOX (snooze_buttons), TRUE);
-	gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (snooze_buttons), 5);
+	gtk_flow_box_set_max_children_per_line (GTK_FLOW_BOX (snooze_buttons), 3);
 	gtk_flow_box_set_column_spacing (GTK_FLOW_BOX (snooze_buttons), 18);
 	gtk_flow_box_set_row_spacing (GTK_FLOW_BOX (snooze_buttons), 18);
 	GtkWidget *snooze_heading = gtk_label_new ("Snooze choices");
@@ -600,7 +631,7 @@ render_list_snapshot (const gchar *json)
 		active_snooze_minutes = g_array_new (FALSE, FALSE, sizeof (guint));
 		for (guint i = 0; defaults && i < json_array_get_length (defaults); i++) { guint value = (guint) json_array_get_int_element (defaults, i); g_array_append_val (active_snooze_minutes, value); }
 		gchar *key = g_strdup_printf ("%s/%s", source_id, calendar_id);
-		JsonObject *override = overrides ? json_object_get_object_member (overrides, key) : NULL;
+		JsonObject *override = overrides && json_object_has_member (overrides, key) ? json_object_get_object_member (overrides, key) : NULL;
 		JsonArray *custom = override ? json_object_get_array_member (override, "snooze_minutes") : NULL;
 		if (custom) { g_clear_pointer (&active_snooze_minutes, g_array_unref); active_snooze_minutes = g_array_new (FALSE, FALSE, sizeof (guint)); for (guint i = 0; i < json_array_get_length (custom); i++) { guint value = (guint) json_array_get_int_element (custom, i); g_array_append_val (active_snooze_minutes, value); } }
 		g_hash_table_add (active_reminders, g_strdup (id));
@@ -695,6 +726,7 @@ static void
 on_activate (GtkApplication *app, gpointer user_data)
 {
 	(void) user_data;
+	if (active_reminders) return;
 	g_application_hold (G_APPLICATION (app));
 	layer_shell_supported = gtk_layer_is_supported ();
 	active_reminders = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
@@ -768,7 +800,7 @@ main (int argc, char **argv)
 		return 0;
 	}
 	application = gtk_application_new ("com.muness.calendar-reminder-overlay",
-		synthetic_alert_id ? G_APPLICATION_NON_UNIQUE : G_APPLICATION_DEFAULT_FLAGS);
+		G_APPLICATION_DEFAULT_FLAGS);
 	g_signal_connect (application, "activate", G_CALLBACK (on_activate), NULL);
 	css = gtk_css_provider_new ();
 	application_css = g_object_ref (css);
