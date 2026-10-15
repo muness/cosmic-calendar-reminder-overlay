@@ -234,6 +234,7 @@ new_home diagnostics
 # This literal child script intentionally inherits HOME and XDG paths at runtime.
 # shellcheck disable=SC2016
 dbus-run-session -- bash -euo pipefail -c '
+  unset DISPLAY WAYLAND_DISPLAY
   "$HOME/.local/bin/reminder-diagnostics" >"$HOME/diagnostics.out"
   grep -Fq "Core owner: stopped or unavailable" "$HOME/diagnostics.out"
   grep -Fq "EDS integration: disabled" "$HOME/diagnostics.out"
