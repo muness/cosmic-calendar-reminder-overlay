@@ -114,7 +114,7 @@ To turn off automatic startup as well:
 systemctl --user disable --now calendar-reminder-overlay.service
 ```
 
-These are service controls, not a timed pause: the service does not monitor calendars while stopped. CLI commands that need the core can start it again. A [panel control with pause/resume and upcoming events](docs/applet-control.md) is proposed; it is not included yet.
+These are service controls, not a timed pause: the service does not monitor calendars while stopped. CLI commands that need the core can start it again. A small [panel control for turning reminders on/off](docs/applet-control.md) is proposed; calendar browsing stays in the existing calendar applet. It is not included yet.
 
 ## Troubleshooting
 
