@@ -86,12 +86,16 @@ def load_config(path):
             raise ValueError("calendar override keys must be source_id/calendar_id")
         if not isinstance(override, dict):
             raise ValueError(f"calendar override {key!r} must be a table")
-        allowed_override = {"fallback_enabled", "audio_enabled", "audio_file", "audio_volume", "audio_repeat_seconds", "snooze_minutes"}
+        allowed_override = {"fallback_enabled", "fallback_lead_minutes", "audio_enabled", "audio_file", "audio_volume", "audio_repeat_seconds", "snooze_minutes"}
         _keys(override, allowed_override, f"calendar_overrides.{key}")
         item = {}
         if "fallback_enabled" in override:
             if not isinstance(override["fallback_enabled"], bool): raise ValueError(f"calendar override {key!r} fallback_enabled must be boolean")
             item["fallback_enabled"] = override["fallback_enabled"]
+        if "fallback_lead_minutes" in override:
+            lead = override["fallback_lead_minutes"]
+            if type(lead) is not int or not 1 <= lead <= 120: raise ValueError(f"calendar override {key!r} fallback_lead_minutes must be an integer from 1 to 120")
+            item["fallback_lead_minutes"] = lead
         if "audio_enabled" in override:
             if not isinstance(override["audio_enabled"], bool): raise ValueError(f"calendar override {key!r} audio_enabled must be boolean")
             item["audio_enabled"] = override["audio_enabled"]
