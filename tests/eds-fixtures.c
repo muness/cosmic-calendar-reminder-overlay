@@ -20,6 +20,7 @@ static const gchar ics[] =
 "BEGIN:VEVENT\r\nUID:recur\r\nRECURRENCE-ID:20261017T130000Z\r\nSUMMARY:Moved standup\r\nDTSTART:20261017T160000Z\r\nDTEND:20261017T163000Z\r\nEND:VEVENT\r\n"
 "BEGIN:VEVENT\r\nUID:cancel\r\nSUMMARY:Cancelled\r\nDTSTART:20261015T140000Z\r\nDTEND:20261015T143000Z\r\nSTATUS:CANCELLED\r\nEND:VEVENT\r\n"
 "BEGIN:VEVENT\r\nUID:alarm\r\nSUMMARY:Native alarm\r\nDTSTART:20261015T150000Z\r\nDTEND:20261015T153000Z\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT\r\n"
+"BEGIN:VEVENT\r\nUID:all-day\r\nSUMMARY:No School\r\nDTSTART;VALUE=DATE:20261016\r\nDTEND;VALUE=DATE:20261017\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT\r\n"
 "BEGIN:VEVENT\r\nUID:inherit-alarm\r\nSUMMARY:Inherited alarm\r\nDTSTART:20261015T170000Z\r\nDTEND:20261015T173000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT10M\r\nDESCRIPTION:Reminder\r\nEND:VALARM\r\nEND:VEVENT\r\n"
 "BEGIN:VEVENT\r\nUID:inherit-alarm\r\nRECURRENCE-ID:20261016T170000Z\r\nSUMMARY:Moved inherited alarm\r\nDTSTART:20261016T190000Z\r\nDTEND:20261016T193000Z\r\nEND:VEVENT\r\n"
 "END:VCALENDAR\r\n";
@@ -32,12 +33,12 @@ main (void)
 	GPtrArray *events = reminder_eds_expand_ics ("calendar-uid", ics, utc,
 		1792022400, 1792368000, FALSE, &error);
 	if (!events) { g_printerr ("fixture expansion failed: %s\n", error ? error->message : "unknown"); return 1; }
-	if (events->len != 6) {
-		g_printerr ("expected 6 reconciled fixture events, got %u\n", events->len);
+	if (events->len != 7) {
+		g_printerr ("expected 7 reconciled fixture events, got %u\n", events->len);
 		for (guint i = 0; i < events->len; i++) { ReminderEdsEvent *event = g_ptr_array_index (events, i); g_printerr ("%s %s %" G_GINT64_FORMAT "\n", event->event_uid, event->recurrence_id, event->start); }
 		return 2;
 	}
-	gboolean saw_moved = FALSE, saw_exdate = FALSE, saw_native = FALSE, saw_cancel = FALSE, saw_inherited_native = FALSE;
+	gboolean saw_moved = FALSE, saw_exdate = FALSE, saw_native = FALSE, saw_cancel = FALSE, saw_inherited_native = FALSE, saw_all_day = FALSE;
 	for (guint i = 0; i < events->len; i++) {
 		ReminderEdsEvent *event = g_ptr_array_index (events, i);
 		if (g_str_equal (event->event_uid, "recur") && g_str_equal (event->recurrence_id, "20261017T130000Z")) {
@@ -50,11 +51,12 @@ main (void)
 		if (g_str_equal (event->event_uid, "recur") && g_str_equal (event->recurrence_id, "20261015T130000Z")) saw_exdate = TRUE;
 		if (g_str_equal (event->event_uid, "recur") && g_str_equal (event->recurrence_id, "20261016T130000Z")) saw_exdate = FALSE;
 		if (g_str_equal (event->event_uid, "alarm")) saw_native = event->native_alarm;
+		if (g_str_equal (event->event_uid, "all-day")) saw_all_day = event->all_day && event->native_alarm;
 		if (g_str_equal (event->event_uid, "inherit-alarm") && g_str_equal (event->recurrence_id, "20261016T170000Z"))
 			saw_inherited_native = event->native_alarm && event->start == 1792177200;
 		if (g_str_equal (event->event_uid, "cancel")) saw_cancel = TRUE;
 	}
-	if (!saw_moved || !saw_exdate || !saw_native || !saw_inherited_native || saw_cancel) {
+	if (!saw_moved || !saw_exdate || !saw_native || !saw_inherited_native || !saw_all_day || saw_cancel) {
 		g_printerr ("fixture did not preserve recurrence/EXDATE/moved/native/cancel semantics\n");
 		g_ptr_array_unref (events); return 3;
 	}
@@ -73,7 +75,7 @@ main (void)
 	if (sqlite3_exec (db,
 		"CREATE TABLE alerts(id TEXT PRIMARY KEY,title TEXT,body TEXT,destination TEXT,state TEXT,action TEXT,payload TEXT,revision INTEGER,expires_at INTEGER,snooze_until INTEGER,action_revision INTEGER,source_id TEXT,calendar_id TEXT,event_start INTEGER,event_end INTEGER,occurrence TEXT,owner TEXT,trigger_at INTEGER);"
 		"CREATE TABLE calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT,last_success_unix INTEGER,error TEXT,event_count INTEGER);"
-		"CREATE TABLE eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,event_end INTEGER,native_alarm INTEGER);"
+		"CREATE TABLE eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,event_end INTEGER,native_alarm INTEGER,all_day INTEGER);"
 		"INSERT INTO alerts VALUES('eds:orphan','Old fallback','','','active','','',1,0,0,0,'eds-local','calendar-uid',0,0,'orphan','fallback',0);",
 		NULL, NULL, &sql_error) != SQLITE_OK) { g_printerr ("fixture DB schema failed: %s\n", sql_error); return 5; }
 	sqlite3_stmt *seed = NULL;
@@ -82,7 +84,7 @@ main (void)
 	if (sqlite3_step (seed) != SQLITE_DONE) return 5;
 	sqlite3_finalize (seed);
 	GError *db_error = NULL;
-	if (!reminder_eds_apply_snapshot (db, "calendar-uid", events, TRUE, TRUE, FALSE, 120, 1792060000, NULL, &db_error)) {
+	if (!reminder_eds_apply_snapshot (db, "calendar-uid", events, TRUE, TRUE, FALSE, FALSE, 120, 1792060000, NULL, &db_error)) {
 		g_printerr ("snapshot application failed: %s\n", db_error ? db_error->message : "unknown"); return 6;
 	}
 	gchar *orphan = row_field (db, "eds:orphan", "state");
@@ -93,7 +95,20 @@ main (void)
 	if (g_strcmp0 (orphan, "withdrawn") || g_strcmp0 (native_kept, "active") || g_strcmp0 (alarm_owner, "native") || g_strcmp0 (moved_state, "scheduled")) {
 		g_printerr ("successful snapshot did not reconcile owner/state expectations\n"); return 7;
 	}
+	gchar *all_day_id = reminder_eds_alert_id ("calendar-uid", "all-day", "");
 	sqlite3_stmt *sync = NULL;
+	if (sqlite3_prepare_v2 (db, "SELECT native_alarm,all_day FROM eds_occurrences WHERE alert_id=?", -1, &sync, NULL) != SQLITE_OK) return 7;
+	sqlite3_bind_text (sync, 1, all_day_id, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step (sync) != SQLITE_ROW || sqlite3_column_int (sync, 0) != 0 || sqlite3_column_int (sync, 1) != 1) {
+		g_printerr ("all-day event remained eligible for its native alarm by default\n"); return 7;
+	}
+	sqlite3_finalize (sync); sync = NULL;
+	if (sqlite3_prepare_v2 (db, "SELECT COUNT(*) FROM alerts WHERE id=?", -1, &sync, NULL) != SQLITE_OK) return 7;
+	sqlite3_bind_text (sync, 1, all_day_id, -1, SQLITE_TRANSIENT);
+	if (sqlite3_step (sync) != SQLITE_ROW || sqlite3_column_int (sync, 0) != 0) {
+		g_printerr ("all-day event created a fallback alert while disabled\n"); return 7;
+	}
+	sqlite3_finalize (sync); sync = NULL; g_free (all_day_id);
 	if (sqlite3_prepare_v2 (db, "SELECT state,last_success_unix,error,event_count FROM calendar_sync WHERE calendar_id='calendar-uid'", -1, &sync, NULL) != SQLITE_OK || sqlite3_step (sync) != SQLITE_ROW ||
 	    g_strcmp0 ((const gchar *) sqlite3_column_text (sync, 0), "fresh") || sqlite3_column_int64 (sync, 1) != 1792060000 || sqlite3_column_int (sync, 3) != (gint) events->len) {
 		g_printerr ("successful snapshot diagnostics do not report the actual fresh snapshot\n"); return 7;
@@ -106,7 +121,7 @@ main (void)
 	}
 	sqlite3_finalize (sync); sync = NULL;
 	g_free (orphan); g_free (native_kept); g_free (alarm_owner); g_free (moved_state);
-	if (!reminder_eds_apply_snapshot (db, "calendar-uid", NULL, FALSE, TRUE, FALSE, 120, 1792063600, "offline fixture failure", &db_error)) return 8;
+	if (!reminder_eds_apply_snapshot (db, "calendar-uid", NULL, FALSE, TRUE, FALSE, FALSE, 120, 1792063600, "offline fixture failure", &db_error)) return 8;
 	if (sqlite3_prepare_v2 (db, "SELECT state,last_success_unix,error FROM calendar_sync WHERE calendar_id='calendar-uid'", -1, &sync, NULL) != SQLITE_OK || sqlite3_step (sync) != SQLITE_ROW ||
 	    g_strcmp0 ((const gchar *) sqlite3_column_text (sync, 0), "stale") || sqlite3_column_int64 (sync, 1) != 1792060000 ||
 	    g_strcmp0 ((const gchar *) sqlite3_column_text (sync, 2), "offline fixture failure")) {
@@ -126,12 +141,12 @@ main (void)
 	native_moved->recurrence_id = g_strdup ("20261017T130000Z"); native_moved->occurrence = g_strdup ("recur/20261017T130000Z");
 	native_moved->title = g_strdup ("Moved standup"); native_moved->start = 1792252800; native_moved->end = 1792254600; native_moved->native_alarm = TRUE;
 	g_ptr_array_add (native_snapshot, native_moved);
-	if (!reminder_eds_apply_snapshot (db, "calendar-uid", native_snapshot, TRUE, TRUE, FALSE, 120, 1792063600, NULL, &db_error)) return 10;
+	if (!reminder_eds_apply_snapshot (db, "calendar-uid", native_snapshot, TRUE, TRUE, FALSE, FALSE, 120, 1792063600, NULL, &db_error)) return 10;
 	gchar *native_replaces_fallback = row_field (db, moved_id, "state");
 	if (g_strcmp0 (native_replaces_fallback, "withdrawn")) { g_printerr ("new native alarm did not withdraw the matching fallback occurrence\n"); return 11; }
 	g_free (native_replaces_fallback); g_ptr_array_unref (native_snapshot);
 	GPtrArray *empty = g_ptr_array_new_with_free_func (reminder_eds_event_free);
-	if (!reminder_eds_apply_snapshot (db, "calendar-uid", empty, TRUE, TRUE, FALSE, 120, 1792067200, NULL, &db_error)) return 12;
+	if (!reminder_eds_apply_snapshot (db, "calendar-uid", empty, TRUE, TRUE, FALSE, FALSE, 120, 1792067200, NULL, &db_error)) return 12;
 	gchar *after_empty = row_field (db, moved_id, "state");
 	gchar *native_after_empty = row_field (db, alarm_id, "state");
 	if (g_strcmp0 (after_empty, "withdrawn") || g_strcmp0 (native_after_empty, "withdrawn")) return 13;

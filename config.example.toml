@@ -40,6 +40,9 @@ calendars = []
 # For events without a native/default calendar alarm, remind this many minutes
 # before the start. Integer from 1 to 120; native alarms take precedence.
 fallback_lead_minutes = 5
+# All-day events are calendar context, so do not show overlays for them by
+# default. Set true only if you want all-day events to interrupt you.
+all_day_enabled = false
 
 [snooze]
 # Visible snooze-button choices, in minutes. Use one or more integers, 1–10080.
@@ -87,6 +90,7 @@ volume = 0.5
 # [calendar_overrides."eds-local/YOUR-CALENDAR-ID"]
 # fallback_enabled = false       # false disables fallback alarms, not native ones
 # fallback_lead_minutes = 10     # 1–120, when fallback is enabled
+# all_day_enabled = true         # allow all-day events to create overlays
 # snooze_minutes = [5, 15]       # same range as [snooze].minutes
 # audio_enabled = true          # enable sound for this calendar
 # audio_file = ""               # built-in tone, or an absolute audio-file path

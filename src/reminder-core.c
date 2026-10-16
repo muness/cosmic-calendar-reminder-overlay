@@ -50,6 +50,7 @@ static JsonNode *validated_policy_node;
 static gboolean audio_enabled;
 static gdouble audio_volume = 0.5;
 static guint fallback_lead_minutes = 5;
+static gboolean all_day_enabled;
 static guint audio_repeat_seconds;
 static GSubprocess *audio_process;
 static guint audio_repeat_source;
@@ -133,6 +134,7 @@ load_policy (const gchar *path, const gchar *helper, GError **error)
 	follow_calendar_selection = json_object_get_boolean_member (calendar, "follow_selection");
 	JsonObject *reminders = json_object_get_object_member (object, "reminders");
 	fallback_lead_minutes = (guint) json_object_get_int_member (reminders, "fallback_lead_minutes");
+	all_day_enabled = json_object_get_boolean_member (reminders, "all_day_enabled");
 	g_free (validated_policy_json);
 	validated_policy_json = g_strdup (stdout_text);
 	g_clear_pointer (&validated_policy_node, json_node_unref);
@@ -800,13 +802,14 @@ eds_scan_finish (EdsScan *scan)
 }
 
 static void
-calendar_policy (const gchar *source_uid, gboolean *fallback_enabled, guint *lead_minutes)
+calendar_policy (const gchar *source_uid, gboolean *fallback_enabled, gboolean *calendar_all_day_enabled, guint *lead_minutes)
 {
 	JsonObject *root = validated_policy_node ? json_node_get_object (validated_policy_node) : NULL;
 	JsonObject *overrides = root && json_object_has_member (root, "calendar_overrides") ? json_object_get_object_member (root, "calendar_overrides") : NULL;
 	gchar *key = g_strdup_printf ("eds-local/%s", source_uid);
 	JsonObject *override = overrides && json_object_has_member (overrides, key) ? json_object_get_object_member (overrides, key) : NULL;
 	*fallback_enabled = !override || !json_object_has_member (override, "fallback_enabled") || json_object_get_boolean_member (override, "fallback_enabled");
+	*calendar_all_day_enabled = override && json_object_has_member (override, "all_day_enabled") ? json_object_get_boolean_member (override, "all_day_enabled") : all_day_enabled;
 	*lead_minutes = override && json_object_has_member (override, "fallback_lead_minutes") ?
 		(guint) json_object_get_int_member (override, "fallback_lead_minutes") : fallback_lead_minutes;
 	g_free (key);
@@ -818,16 +821,17 @@ apply_cached_fallback_policy (void)
 	sqlite3_stmt *rows = NULL, *update = NULL;
 	GPtrArray *changes = g_ptr_array_new_with_free_func (g_free);
 	gint64 now = (gint64) time (NULL);
-	if (sqlite3_prepare_v2 (db, "SELECT id,calendar_id,event_start,event_end,state FROM alerts WHERE source_id='eds-local' AND owner='fallback' AND state IN ('active','scheduled','snoozed')", -1, &rows, NULL) == SQLITE_OK) {
+	if (sqlite3_prepare_v2 (db, "SELECT id,calendar_id,event_start,event_end,state,COALESCE((SELECT all_day FROM eds_occurrences WHERE alert_id=alerts.id),0) FROM alerts WHERE source_id='eds-local' AND owner='fallback' AND state IN ('active','scheduled','snoozed')", -1, &rows, NULL) == SQLITE_OK) {
 		while (sqlite3_step (rows) == SQLITE_ROW) {
 			const gchar *id = (const gchar *) sqlite3_column_text (rows, 0);
 			const gchar *calendar = (const gchar *) sqlite3_column_text (rows, 1);
 			const gchar *state = (const gchar *) sqlite3_column_text (rows, 4);
 			gint64 start = sqlite3_column_int64 (rows, 2), end = sqlite3_column_int64 (rows, 3);
 			gboolean enabled = FALSE;
+			gboolean allow_all_day = FALSE;
 			guint lead = fallback_lead_minutes;
-			calendar_policy (calendar, &enabled, &lead);
-			if (!calendar_uid_may_retain_snapshot (calendar) || !enabled || start <= 0 || end <= now) {
+			calendar_policy (calendar, &enabled, &allow_all_day, &lead);
+			if (!calendar_uid_may_retain_snapshot (calendar) || !enabled || (sqlite3_column_int (rows, 5) && !allow_all_day) || start <= 0 || end <= now) {
 				g_ptr_array_add (changes, g_strdup_printf ("%s\twithdrawn\t0", id));
 				continue;
 			}
@@ -974,11 +978,11 @@ eds_parse_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	GError *error = NULL;
 	GPtrArray *events = g_task_propagate_pointer (G_TASK (result), &error);
 	if (events && !scan->invalidated && eds_enabled && calendar_source_selected (scan->source)) {
-		gboolean fallback_enabled;
+		gboolean fallback_enabled, calendar_all_day_enabled;
 		guint lead_minutes;
-		calendar_policy (scan->source_uid, &fallback_enabled, &lead_minutes);
+		calendar_policy (scan->source_uid, &fallback_enabled, &calendar_all_day_enabled, &lead_minutes);
 		if (!reminder_eds_apply_snapshot (db, scan->source_uid, events, TRUE, fallback_enabled,
-			global_native_default, lead_minutes, (gint64) time (NULL), NULL, &error))
+			calendar_all_day_enabled, global_native_default, lead_minutes, (gint64) time (NULL), NULL, &error))
 			g_warning ("Could not apply EDS snapshot for %s: %s", scan->source_uid, error ? error->message : "unknown error");
 		else {
 			reset_renderer_retries ();
@@ -988,7 +992,7 @@ eds_parse_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	}
 	if (error && !scan->invalidated && eds_enabled && calendar_source_selected (scan->source)) {
 		g_warning ("Could not reconcile EDS calendar %s; retaining last successful snapshot: %s", scan->source_uid, error->message);
-		reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error->message, NULL);
+		reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error->message, NULL);
 	}
 	g_clear_error (&error);
 	if (events) g_ptr_array_unref (events);
@@ -1046,7 +1050,7 @@ eds_fetch_done (GObject *source, GAsyncResult *result, gpointer user_data)
 		g_set_error (&error, G_IO_ERROR, G_IO_ERROR_FAILED, "EDS returned no usable calendar snapshot; preserving the previous snapshot");
 	if (error) {
 		if (!scan->invalidated && eds_enabled && calendar_source_selected (scan->source))
-			reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error->message, NULL);
+			reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error->message, NULL);
 		eds_scan_finish (scan);
 	}
 	g_clear_error (&error);
@@ -1061,7 +1065,7 @@ eds_connect_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	EClient *client = e_cal_client_connect_finish (result, &error);
 	if (!client) {
 		if (!scan->invalidated && eds_enabled && calendar_source_selected (scan->source))
-			reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error ? error->message : "EDS connection failed", NULL);
+			reminder_eds_apply_snapshot (db, scan->source_uid, NULL, FALSE, FALSE, FALSE, FALSE, 0, (gint64) time (NULL), error ? error->message : "EDS connection failed", NULL);
 		g_warning ("Could not connect to EDS calendar %s; retaining last successful snapshot: %s", scan->source_uid, error ? error->message : "unknown error");
 		g_clear_error (&error);
 		eds_scan_finish (scan);
@@ -1223,7 +1227,7 @@ eds_registry_ready (GObject *source, GAsyncResult *result, gpointer user_data)
 			while (g_hash_table_iter_next (&iter, &key, NULL)) {
 				const gchar *selection_key = key;
 				if (g_str_has_prefix (selection_key, "eds-local/"))
-					reminder_eds_apply_snapshot (db, selection_key + strlen ("eds-local/"), NULL, FALSE, FALSE, FALSE, 0, time (NULL), error ? error->message : "EDS registry unavailable", NULL);
+					reminder_eds_apply_snapshot (db, selection_key + strlen ("eds-local/"), NULL, FALSE, FALSE, FALSE, FALSE, 0, time (NULL), error ? error->message : "EDS registry unavailable", NULL);
 			}
 		}
 		g_clear_error (&error);
@@ -1855,7 +1859,11 @@ int main (int argc, char **argv)
     presentation_enabled = g_strcmp0 ((const gchar *) sqlite3_column_text (presentation_statement, 0), "0") != 0;
   sqlite3_finalize (presentation_statement);
   if (!exec_sql ("CREATE TABLE IF NOT EXISTS alerts(id TEXT PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL,destination TEXT NOT NULL,state TEXT NOT NULL,action TEXT NOT NULL,payload TEXT NOT NULL,revision INTEGER NOT NULL,expires_at INTEGER NOT NULL,snooze_until INTEGER NOT NULL,action_revision INTEGER NOT NULL DEFAULT 0,source_id TEXT NOT NULL DEFAULT '',calendar_id TEXT NOT NULL DEFAULT '',event_start INTEGER NOT NULL DEFAULT 0,event_end INTEGER NOT NULL DEFAULT 0,occurrence TEXT NOT NULL DEFAULT '',owner TEXT NOT NULL DEFAULT 'producer',trigger_at INTEGER NOT NULL DEFAULT 0);", &error)) { g_printerr ("state schema: %s\n", error->message); return 1; }
-	if (!exec_sql ("CREATE TABLE IF NOT EXISTS calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT NOT NULL,last_success_unix INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',event_count INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT NOT NULL,event_uid TEXT NOT NULL,recurrence_id TEXT NOT NULL,event_start INTEGER NOT NULL,event_end INTEGER NOT NULL,native_alarm INTEGER NOT NULL);", &error)) { g_printerr ("calendar diagnostics schema: %s\n", error->message); return 1; }
+	if (!exec_sql ("CREATE TABLE IF NOT EXISTS calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT NOT NULL,last_success_unix INTEGER NOT NULL DEFAULT 0,error TEXT NOT NULL DEFAULT '',event_count INTEGER NOT NULL DEFAULT 0); CREATE TABLE IF NOT EXISTS eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT NOT NULL,event_uid TEXT NOT NULL,recurrence_id TEXT NOT NULL,event_start INTEGER NOT NULL,event_end INTEGER NOT NULL,native_alarm INTEGER NOT NULL,all_day INTEGER NOT NULL DEFAULT 0);", &error)) { g_printerr ("calendar diagnostics schema: %s\n", error->message); return 1; }
+	if (!exec_sql ("ALTER TABLE eds_occurrences ADD COLUMN all_day INTEGER NOT NULL DEFAULT 0", &error)) {
+		if (!strstr (error ? error->message : "", "duplicate column name")) { g_printerr ("state migration: %s\n", error ? error->message : "unknown error"); return 1; }
+		g_clear_error (&error);
+	}
   sqlite3_stmt *columns = NULL;
   gboolean has_action_revision = FALSE, has_source_id = FALSE, has_calendar_id = FALSE, has_event_start = FALSE, has_event_end = FALSE, has_occurrence = FALSE, has_owner = FALSE, has_trigger_at = FALSE;
   if (sqlite3_prepare_v2 (db, "PRAGMA table_info(alerts)", -1, &columns, NULL) != SQLITE_OK) return 1;

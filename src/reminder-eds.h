@@ -14,6 +14,7 @@ typedef struct {
 	gint64 start;
 	gint64 end;
 	gboolean native_alarm;
+	gboolean all_day;
 } ReminderEdsEvent;
 
 void reminder_eds_event_free (gpointer data);
@@ -32,6 +33,7 @@ gboolean reminder_eds_apply_snapshot (sqlite3 *db,
 	GPtrArray *events,
 	gboolean fetch_succeeded,
 	gboolean fallback_enabled,
+	gboolean all_day_enabled,
 	gboolean global_native_default,
 	guint fallback_lead_minutes,
 	gint64 now,
