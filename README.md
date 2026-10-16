@@ -183,6 +183,6 @@ Uninstall preserves configuration and alert state. `./uninstall.sh --purge` also
 
 ## Development and desktop support
 
-`make` builds the core and GTK renderer; `make check` runs the automated checks. The core owns persistent alert state and a session D-Bus API; the CLI and renderer consume it.
+`make` builds the core and GTK renderer; `make check` runs the automated checks. With a GTK display available, `make check-layout` also checks long-content wrapping, viewport limits, scrolling, and action visibility without displaying a window. The core owns persistent alert state and a session D-Bus API; the CLI and renderer consume it.
 
 COSMIC has local user acceptance for the installed alpha. Multi-monitor behavior, other compositors, and all account/provider combinations are not established by that result. Hyprland/Omarchy and KDE Plasma Wayland are unverified. The optional GNOME Shell helper is experimental and not installed automatically. See [compatibility](docs/compatibility.md), [GNOME helper](gnome-extension/README.md), and [Akonadi discovery](docs/akonadi-discovery.md).

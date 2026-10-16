@@ -377,7 +377,7 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	      const gchar *calendar_id, gboolean local, guint64 revision,
 	      GdkMonitor *monitor, gboolean copy)
 {
-	GtkWidget *outer, *center, *content, *title, *details, *details_scroll, *status, *message, *primary_buttons, *snooze_buttons, *button;
+	GtkWidget *outer, *bounds, *center, *content_scroll, *scroll_content, *content, *title, *details, *details_scroll, *status, *message, *primary_buttons, *snooze_buttons, *button;
 	ReminderUi *ui;
 	ui = g_new0 (ReminderUi, 1);
 	ui->generation = ui_generation;
@@ -427,15 +427,46 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	GtkGesture *surface_click = gtk_gesture_click_new ();
 	g_signal_connect (surface_click, "pressed", G_CALLBACK (on_surface_click), outer);
 	gtk_widget_add_controller (outer, GTK_EVENT_CONTROLLER (surface_click));
+	/* Natural text size must never dictate the size of the overlay surface.
+	 * Keep the reminder within a bounded viewport, including its actions, so
+	 * unusually long content or extra snooze choices remain reachable. Monitor
+	 * geometry is already in logical pixels; do not apply its scale again. */
+	GdkRectangle geometry = { 0, 0, 1104, 964 };
+	if (monitor) gdk_monitor_get_geometry (monitor, &geometry);
+	bounds = gtk_scrolled_window_new ();
+	gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (bounds), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_max_content_width (GTK_SCROLLED_WINDOW (bounds), MAX (1, MIN (1040, geometry.width - 64)));
+	gtk_scrolled_window_set_max_content_height (GTK_SCROLLED_WINDOW (bounds), MAX (1, MIN (900, geometry.height - 64)));
+	gtk_scrolled_window_set_propagate_natural_width (GTK_SCROLLED_WINDOW (bounds), TRUE);
+	gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (bounds), TRUE);
+	gtk_widget_set_halign (bounds, GTK_ALIGN_CENTER);
+	gtk_widget_set_valign (bounds, GTK_ALIGN_CENTER);
+	gtk_widget_set_hexpand (bounds, TRUE);
+	gtk_widget_set_vexpand (bounds, TRUE);
+	gtk_widget_set_margin_top (bounds, 32);
+	gtk_widget_set_margin_bottom (bounds, 32);
+	gtk_widget_set_margin_start (bounds, 32);
+	gtk_widget_set_margin_end (bounds, 32);
 	center = gtk_box_new (GTK_ORIENTATION_VERTICAL, 28);
 	gtk_widget_set_hexpand (center, TRUE);
 	gtk_widget_set_vexpand (center, TRUE);
-	gtk_widget_set_halign (center, GTK_ALIGN_CENTER);
-	gtk_widget_set_valign (center, GTK_ALIGN_CENTER);
-	gtk_widget_set_margin_top (center, 32);
-	gtk_widget_set_margin_bottom (center, 32);
-	gtk_widget_set_margin_start (center, 32);
-	gtk_widget_set_margin_end (center, 32);
+	gtk_widget_set_halign (center, GTK_ALIGN_FILL);
+	gtk_widget_set_valign (center, GTK_ALIGN_FILL);
+	/* Reserve space for Open/Dismiss; the content and snooze choices take
+	 * the remaining height. The outer viewport is a final fallback for screens
+	 * too small even for the action buttons (or very large accessibility text). */
+	content_scroll = gtk_scrolled_window_new ();
+	gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (content_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (content_scroll), FALSE);
+	gtk_scrolled_window_set_max_content_height (GTK_SCROLLED_WINDOW (content_scroll), 600);
+	gtk_scrolled_window_set_max_content_width (GTK_SCROLLED_WINDOW (content_scroll), 1040);
+	gtk_scrolled_window_set_propagate_natural_width (GTK_SCROLLED_WINDOW (content_scroll), TRUE);
+	gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (content_scroll), TRUE);
+	gtk_widget_set_vexpand (content_scroll, TRUE);
+	scroll_content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 28);
+	gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (content_scroll), scroll_content);
+	gtk_scrollable_set_vscroll_policy (GTK_SCROLLABLE (gtk_scrolled_window_get_child (GTK_SCROLLED_WINDOW (content_scroll))), GTK_SCROLL_NATURAL);
+	gtk_box_append (GTK_BOX (center), content_scroll);
 
 	content = gtk_box_new (GTK_ORIENTATION_VERTICAL, 20);
 	gtk_widget_add_css_class (content, "reminder-content");
@@ -448,6 +479,7 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_widget_add_css_class (title, "reminder-title");
 	gtk_label_set_xalign (GTK_LABEL (title), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (title), TRUE);
+	gtk_label_set_wrap_mode (GTK_LABEL (title), PANGO_WRAP_WORD_CHAR);
 	gtk_label_set_max_width_chars (GTK_LABEL (title), 64);
 	gtk_box_append (GTK_BOX (content), title);
 
@@ -456,9 +488,11 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_label_set_xalign (GTK_LABEL (details), 0.0f);
 	gtk_label_set_yalign (GTK_LABEL (details), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (details), TRUE);
+	gtk_label_set_wrap_mode (GTK_LABEL (details), PANGO_WRAP_WORD_CHAR);
 	gtk_label_set_max_width_chars (GTK_LABEL (details), 100);
 	details_scroll = gtk_scrolled_window_new ();
 	gtk_scrolled_window_set_policy (GTK_SCROLLED_WINDOW (details_scroll), GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_overlay_scrolling (GTK_SCROLLED_WINDOW (details_scroll), FALSE);
 	gtk_scrolled_window_set_max_content_height (GTK_SCROLLED_WINDOW (details_scroll), 320);
 	gtk_scrolled_window_set_max_content_width (GTK_SCROLLED_WINDOW (details_scroll), 1400);
 	gtk_scrolled_window_set_propagate_natural_height (GTK_SCROLLED_WINDOW (details_scroll), TRUE);
@@ -475,13 +509,14 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_widget_add_css_class (message, "reminder-status");
 	gtk_label_set_xalign (GTK_LABEL (message), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (message), TRUE);
+	gtk_label_set_wrap_mode (GTK_LABEL (message), PANGO_WRAP_WORD_CHAR);
 	gtk_box_append (GTK_BOX (content), message);
 	GtkWidget *keyboard_hint = gtk_label_new ("Click the background, then Tab to choose a button.");
 	gtk_widget_add_css_class (keyboard_hint, "reminder-hint");
 	gtk_label_set_xalign (GTK_LABEL (keyboard_hint), 0.0f);
 	gtk_label_set_wrap (GTK_LABEL (keyboard_hint), TRUE);
 	gtk_box_append (GTK_BOX (content), keyboard_hint);
-	gtk_box_append (GTK_BOX (center), content);
+	gtk_box_append (GTK_BOX (scroll_content), content);
 
 	primary_buttons = gtk_flow_box_new ();
 	gtk_flow_box_set_selection_mode (GTK_FLOW_BOX (primary_buttons), GTK_SELECTION_NONE);
@@ -515,7 +550,7 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	GtkWidget *snooze_heading = gtk_label_new ("Snooze choices");
 	gtk_widget_add_css_class (snooze_heading, "reminder-group-heading");
 	gtk_label_set_xalign (GTK_LABEL (snooze_heading), 0.0f);
-	gtk_box_append (GTK_BOX (center), snooze_heading);
+	gtk_box_append (GTK_BOX (scroll_content), snooze_heading);
 	for (guint i = 0; active_snooze_minutes && i < active_snooze_minutes->len; i++) {
 		guint minutes = g_array_index (active_snooze_minutes, guint, i);
 		gchar *label = g_strdup_printf ("Snooze %u min", minutes);
@@ -534,10 +569,11 @@ show_overlay (const gchar *summary, const gchar *body, gchar *meeting_url,
 	gtk_widget_set_sensitive (button, ui->event_start > time (NULL));
 	g_signal_connect (button, "clicked", G_CALLBACK (on_snooze_until_start_clicked), ui);
 	gtk_flow_box_insert (GTK_FLOW_BOX (snooze_buttons), button, -1);
-	gtk_box_append (GTK_BOX (center), snooze_buttons);
+	gtk_box_append (GTK_BOX (scroll_content), snooze_buttons);
 
 	gtk_window_set_child (ui->window, outer);
-	gtk_box_append (GTK_BOX (outer), center);
+	gtk_scrolled_window_set_child (GTK_SCROLLED_WINDOW (bounds), center);
+	gtk_box_append (GTK_BOX (outer), bounds);
 	update_countdown (ui);
 	ui->countdown_source = g_timeout_add_seconds (1, update_countdown, ui);
 	gtk_window_present (ui->window);
