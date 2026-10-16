@@ -272,7 +272,7 @@ impl cosmic::Application for Reminders {
     fn view(&self) -> Element<'_, Message> {
         let icon = match self.enabled {
             Some(true) => "alarm-symbolic",
-            Some(false) => "notifications-disabled-symbolic",
+            Some(false) => "notification-disabled-symbolic",
             None => "dialog-warning-symbolic",
         };
         self.core
