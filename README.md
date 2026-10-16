@@ -86,7 +86,7 @@ From the checkout, in your graphical session:
 ~/.local/bin/reminder-diagnostics
 ```
 
-Look for **User service: active** and per-calendar fetch status in diagnostics. Calendar synchronization can take time; an active service alone does not prove the provider has synced. Existing calendar alarms are used when available; fallback reminders use a five-minute lead by default. [Configuration options](config.example.toml) cover snooze choices, selected outputs, theme, fallback behavior, per-calendar overrides, and optional audio. Sound is off by default.
+Look for **User service: active** and per-calendar fetch status in diagnostics. Calendar synchronization can take time; an active service alone does not prove the provider has synced. Existing calendar alarms are used when available; fallback reminders use a five-minute lead by default. All-day events do not create overlays by default; set `[reminders].all_day_enabled = true` to allow them globally, or use a per-calendar override. [Configuration options](config.example.toml) cover snooze choices, selected outputs, theme, fallback behavior, per-calendar overrides, and optional audio. Sound is off by default.
 
 Activation enables startup with your graphical session and starts or restarts the service. From a text session it enables startup for the next graphical login. It replaces the specifically named legacy `evolution-dunst-reminders.service` if present. It does not replace Dunst, SwayNC, or your ordinary notification daemon.
 

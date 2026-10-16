@@ -31,7 +31,7 @@ def load_config(path):
     try:
         config = tomllib.loads(pathlib.Path(path).read_text())
     except FileNotFoundError:
-        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0, "volume": 0.5}, "calendar": {"eds_enabled": False, "follow_selection": True}, "calendar_overrides": {}}
+        return {"selection": {"mode": "include", "calendars": []}, "reminders": {"fallback_lead_minutes": 5, "all_day_enabled": False}, "snooze": {"minutes": [1, 5]}, "display": {"backend": "native", "outputs": "all"}, "appearance": {"theme": "default"}, "audio": {"enabled": False, "file": "", "repeat_seconds": 0, "volume": 0.5}, "calendar": {"eds_enabled": False, "follow_selection": True}, "calendar_overrides": {}}
     except (tomllib.TOMLDecodeError, OSError) as exc:
         raise ValueError(f"cannot load config {path}: {exc}") from exc
     _keys(config, {"version", "selection", "reminders", "snooze", "display", "appearance", "audio", "calendar", "calendar_overrides"}, "root")
@@ -45,10 +45,13 @@ def load_config(path):
     if mode == "all" and calendars:
         raise ValueError("[selection] calendars must be empty when mode = 'all'")
     reminders = config.get("reminders", {})
-    _keys(reminders, {"fallback_lead_minutes"}, "reminders")
+    _keys(reminders, {"fallback_lead_minutes", "all_day_enabled"}, "reminders")
     lead = reminders.get("fallback_lead_minutes", 5)
     if type(lead) is not int or not 1 <= lead <= 120:
         raise ValueError("[reminders].fallback_lead_minutes must be an integer from 1 to 120")
+    all_day_enabled = reminders.get("all_day_enabled", False)
+    if not isinstance(all_day_enabled, bool):
+        raise ValueError("[reminders].all_day_enabled must be boolean")
     snooze = config.get("snooze", {})
     _keys(snooze, {"minutes"}, "snooze")
     minutes = snooze.get("minutes", [1, 5])
@@ -86,7 +89,7 @@ def load_config(path):
             raise ValueError("calendar override keys must be source_id/calendar_id")
         if not isinstance(override, dict):
             raise ValueError(f"calendar override {key!r} must be a table")
-        allowed_override = {"fallback_enabled", "fallback_lead_minutes", "audio_enabled", "audio_file", "audio_volume", "audio_repeat_seconds", "snooze_minutes"}
+        allowed_override = {"fallback_enabled", "fallback_lead_minutes", "all_day_enabled", "audio_enabled", "audio_file", "audio_volume", "audio_repeat_seconds", "snooze_minutes"}
         _keys(override, allowed_override, f"calendar_overrides.{key}")
         item = {}
         if "fallback_enabled" in override:
@@ -96,6 +99,9 @@ def load_config(path):
             lead = override["fallback_lead_minutes"]
             if type(lead) is not int or not 1 <= lead <= 120: raise ValueError(f"calendar override {key!r} fallback_lead_minutes must be an integer from 1 to 120")
             item["fallback_lead_minutes"] = lead
+        if "all_day_enabled" in override:
+            if not isinstance(override["all_day_enabled"], bool): raise ValueError(f"calendar override {key!r} all_day_enabled must be boolean")
+            item["all_day_enabled"] = override["all_day_enabled"]
         if "audio_enabled" in override:
             if not isinstance(override["audio_enabled"], bool): raise ValueError(f"calendar override {key!r} audio_enabled must be boolean")
             item["audio_enabled"] = override["audio_enabled"]
@@ -121,7 +127,7 @@ def load_config(path):
         "selection": {"mode": mode, "calendars": calendars},
         "calendar": {"eds_enabled": calendar.get("eds_enabled", False), "follow_selection": calendar.get("follow_selection", True)},
         "audio": {"enabled": audio.get("enabled", False), "file": audio.get("file", ""), "repeat_seconds": repeat, "volume": volume},
-        "reminders": {"fallback_lead_minutes": lead},
+        "reminders": {"fallback_lead_minutes": lead, "all_day_enabled": all_day_enabled},
         "snooze": {"minutes": minutes},
         "display": {"backend": display.get("backend", "native"), "outputs": display.get("outputs", "all")},
         "appearance": {"theme": appearance.get("theme", "default")},

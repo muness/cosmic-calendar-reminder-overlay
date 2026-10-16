@@ -58,9 +58,9 @@ assert policy['calendar'] == {'eds_enabled': False, 'follow_selection': False}, 
 override.write_text('version=1\n[calendar]\nfollow_selection="false"\n')
 bad = subprocess.run(['/usr/bin/python3', cli, '--config', str(override), 'config-check'], capture_output=True, text=True)
 assert bad.returncode != 0, 'non-boolean follow_selection was accepted'
-override.write_text('version=1\n[calendar_overrides."eds-local/cal"]\nfallback_enabled=true\nfallback_lead_minutes=17\n')
+override.write_text('version=1\n[calendar_overrides."eds-local/cal"]\nfallback_enabled=true\nfallback_lead_minutes=17\nall_day_enabled=true\n')
 policy = json.loads(subprocess.check_output(['/usr/bin/python3', cli, '--config', str(override), 'policy-json'], text=True))
-assert policy['calendar_overrides']['eds-local/cal'] == {'fallback_enabled': True, 'fallback_lead_minutes': 17}, policy
+assert policy['calendar_overrides']['eds-local/cal'] == {'fallback_enabled': True, 'fallback_lead_minutes': 17, 'all_day_enabled': True}, policy
 override.write_text('version=1\n[calendar_overrides."eds-local/cal"]\nfallback_lead_minutes=121\n')
 bad = subprocess.run(['/usr/bin/python3', cli, '--config', str(override), 'config-check'], capture_output=True, text=True)
 assert bad.returncode != 0, 'invalid per-calendar fallback lead was accepted'

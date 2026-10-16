@@ -100,6 +100,7 @@ event_from_times (Expansion *expansion, ICalComponent *component, ICalTime *star
 	event->end = end && !i_cal_time_is_null_time (end) ? time_to_unix (expansion, end, error) : event->start;
 	if (event->start < 0 || event->end < 0) { reminder_eds_event_free (event); return NULL; }
 	event->native_alarm = expansion->for_every_event || component_has_alarm (component);
+	event->all_day = i_cal_time_is_date (start);
 	return event;
 }
 
@@ -271,7 +272,7 @@ step_done (sqlite3 *db, sqlite3_stmt *statement, GError **error)
 gboolean
 reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 			     GPtrArray *events, gboolean fetch_succeeded,
-			     gboolean fallback_enabled, gboolean global_native_default,
+				 gboolean fallback_enabled, gboolean all_day_enabled, gboolean global_native_default,
 			     guint fallback_lead_minutes, gint64 now,
 			     const gchar *error_message, GError **error)
 {
@@ -303,7 +304,8 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 		gchar *id = reminder_eds_alert_id (source_uid, event->event_uid, event->recurrence_id);
 		g_hash_table_add (present, g_strdup (id));
 		gboolean native = event->native_alarm || global_native_default;
-		if (sqlite3_prepare_v2 (database, "INSERT INTO eds_occurrences(alert_id,calendar_id,event_uid,recurrence_id,event_start,event_end,native_alarm) VALUES(?,?,?,?,?,?,?)", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
+		if (event->all_day && !all_day_enabled) native = FALSE;
+		if (sqlite3_prepare_v2 (database, "INSERT INTO eds_occurrences(alert_id,calendar_id,event_uid,recurrence_id,event_start,event_end,native_alarm,all_day) VALUES(?,?,?,?,?,?,?,?)", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
 		sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text (statement, 2, source_uid, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text (statement, 3, event->event_uid, -1, SQLITE_TRANSIENT);
@@ -311,6 +313,7 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 		sqlite3_bind_int64 (statement, 5, event->start);
 		sqlite3_bind_int64 (statement, 6, event->end);
 		sqlite3_bind_int (statement, 7, native);
+		sqlite3_bind_int (statement, 8, event->all_day);
 		if (!step_done (database, statement, error)) { g_free (id); goto rollback; }
 		sqlite3_finalize (statement); statement = NULL;
 		if (event->end <= now) {
@@ -320,6 +323,15 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 			sqlite3_finalize (statement); statement = NULL;
 			if (!step_ok) { g_free (id); goto rollback; }
 			g_free (id);
+			continue;
+		}
+		if (event->all_day && !all_day_enabled) {
+			if (sqlite3_prepare_v2 (database, "UPDATE alerts SET state='withdrawn',revision=revision+1 WHERE id=? AND owner IN ('native','fallback') AND state IN ('active','scheduled','snoozed')", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
+			sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
+			gboolean step_ok = step_done (database, statement, error);
+			sqlite3_finalize (statement); statement = NULL;
+			g_free (id);
+			if (!step_ok) goto rollback;
 			continue;
 		}
 		if (native) {
