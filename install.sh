@@ -2,13 +2,15 @@
 set -euo pipefail
 : "${HOME:?HOME must be set}"
 
-usage() { printf 'Usage: %s [--activate] [--with-applet]\n' "${0##*/}"; }
+usage() { printf 'Usage: %s [--activate] [--with-applet] [--with-omarchy]\n' "${0##*/}"; }
 activate=false
 with_applet=false
+with_omarchy=false
 while (($#)); do
   case "$1" in
     --activate) activate=true ;;
     --with-applet) with_applet=true ;;
+    --with-omarchy) with_omarchy=true ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; exit 2 ;;
   esac
@@ -49,6 +51,10 @@ if ! pkg-config --exists gtk4 gtk4-layer-shell-0 libecal-2.0 gio-2.0 sqlite3 jso
 fi
 if ! /usr/bin/python3 -c 'import tomllib; from gi.repository import Gio, GLib' >/dev/null 2>&1; then
   echo '/usr/bin/python3 needs Python 3.11+ with tomllib and PyGObject (Gio/GLib). Install those dependencies, then rerun install.sh.' >&2
+  exit 1
+fi
+if [[ "$with_omarchy" == true && ! -f "${OMARCHY_PATH:-/usr/share/omarchy}/shell/Commons/qmldir" ]]; then
+  echo 'Omarchy shell is required for --with-omarchy. Shared reminder files were not changed.' >&2
   exit 1
 fi
 make -C "$root" all
@@ -132,6 +138,10 @@ DESKTOP
 fi
 
 install -m 0644 "$root/systemd/calendar-reminder-overlay.service" "$unit_file"
+
+if [[ "$with_omarchy" == true ]]; then
+  /usr/bin/python3 "$root/adapters/omarchy/install.py"
+fi
 
 if [[ "$activate" == true ]]; then
   command -v systemctl >/dev/null || { echo 'systemctl is required for --activate' >&2; exit 1; }
