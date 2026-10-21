@@ -22,7 +22,7 @@ The repository's `uninstall.sh` also removes this widget when removing the share
 
 ## Behavior
 
-Click the bell for active and upcoming reminders, selected-calendar count, and sync problems. Disabled reminders and an unavailable service have distinct states. Turn reminders on/off, start a stopped service, open Evolution Calendar, edit settings, apply settings, or launch a silent isolated preview. Presentation off changes the shared service setting, so it applies across desktop adapters. Event titles render as literal text; event bodies and meeting URLs are not sent to the bar. Actions use argument arrays, not shell interpolation.
+Click the bell for active and upcoming reminders, selected-calendar count, and sync problems. Disabled reminders and an unavailable service have distinct states. Turn reminders on/off, start a stopped service, open the calendar (Evolution by default, or `~/.local/bin/reminder-calendar` when executable), edit settings, apply settings, or launch a silent isolated preview. Presentation off changes the shared service setting, so it applies across desktop adapters. Event titles render as literal text; event bodies and meeting URLs are not sent to the bar. Actions use argument arrays, not shell interpolation.
 
 The adapter watches core changes and ownership, reconnects after service loss, and refreshes every 30 seconds. Read-only status never starts the core via D-Bus activation. Calendar policy, alarm eligibility, and durable state stay in the core; the widget lists at most six pending reminders.
 

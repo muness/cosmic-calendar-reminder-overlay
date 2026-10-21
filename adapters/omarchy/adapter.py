@@ -87,12 +87,13 @@ def watch():
 
 def action(name):
     home = Path.home()
+    calendar_launcher = home / '.local/bin/reminder-calendar'
     commands = {
         'start': ['/usr/bin/systemctl', '--user', 'start', 'calendar-reminder-overlay.service'],
         'settings': [str(home / '.local/bin/reminder-settings')],
         'reload': [str(home / '.local/bin/reminderctl'), 'reload'],
         'preview': [str(home / '.local/bin/reminder-demo')],
-        'calendar': ['/usr/bin/evolution', '-c', 'calendar'],
+        'calendar': [str(calendar_launcher)] if os.access(calendar_launcher, os.X_OK) else ['/usr/bin/evolution', '-c', 'calendar'],
     }
     if name in ('enable', 'disable'):
         if not call('SetPresentation', '(b)', (name == 'enable',))[0]:
