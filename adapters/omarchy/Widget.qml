@@ -75,10 +75,11 @@ Panel {
     }
   }
 
-  BarIconButton {
+  WidgetButton {
     id: trigger
     anchors.fill: parent
     bar: root.bar
+    horizontalMargin: 8.5
     text: !root.available ? "󰂜" : !root.state.enabled ? "󰂛"
       : root.state.active_count > 0 ? "󰂚 " + root.state.active_count
       : root.reminders.length > 0 ? "󰂚 " + root.eventTime(root.reminders[0]) : "󰂚"
