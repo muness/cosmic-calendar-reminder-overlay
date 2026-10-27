@@ -27,6 +27,7 @@ Panel {
     : !state.eds_enabled ? "Calendar integration is off. Open settings to connect calendars."
     : state.registry_state !== "ready" ? "Connecting to calendar accounts…"
     : state.selected_calendars === 0 ? "No calendars selected. Select calendars in Evolution."
+    : state.active_scans > 0 ? "Refreshing calendars…"
     : state.calendar_problems > 0 ? "Some calendars need attention. Open Calendar to check sync."
     : state.selected_calendars + (state.selected_calendars === 1 ? " calendar connected" : " calendars connected")
 
@@ -83,7 +84,8 @@ Panel {
     text: !root.available ? "󰂜" : !root.state.enabled ? "󰂛"
       : root.state.active_count > 0 ? "󰂚 " + root.state.active_count
       : root.reminders.length > 0 ? "󰂚 " + root.eventTime(root.reminders[0]) : "󰂚"
-    tooltipText: root.statusText
+    tooltipText: root.available && root.state.enabled && root.reminders.length > 0
+      ? root.reminders[0].title : root.available && root.state.enabled ? "No upcoming events or reminders" : root.statusText
     onPressed: root.toggle()
   }
 
@@ -141,7 +143,7 @@ Panel {
         }
         Text {
           width: parent.width
-          visible: root.available
+          visible: root.available && (!root.state.eds_enabled || root.state.registry_state !== "ready" || root.state.selected_calendars === 0 || root.state.calendar_problems > 0 || !root.state.enabled)
           text: root.calendarText + (!root.state.enabled ? "\nCalendar sync continues; overlays and sound are paused." : "")
           textFormat: Text.PlainText
           color: ThemeColor.foreground
@@ -217,10 +219,31 @@ Panel {
         Flow {
           width: parent.width
           spacing: Style.space(8)
+          Button { text: "Refresh"; focusable: true; enabled: root.available && !root.busy; onClicked: root.runAction("refresh") }
           Button { text: "Open calendar"; focusable: true; enabled: !root.busy; onClicked: root.runAction("calendar") }
           Button { text: "Settings"; focusable: true; enabled: !root.busy; onClicked: root.runAction("settings") }
           Button { text: "Apply settings"; focusable: true; enabled: root.available && !root.busy; onClicked: root.runAction("reload") }
           Button { text: "Preview overlay"; focusable: true; enabled: !root.busy; onClicked: { root.runAction("preview"); root.close() } }
+        }
+        Item {
+          width: parent.width
+          height: calendarFooter.implicitHeight
+          visible: root.available
+          Text {
+            id: calendarFooter
+            width: parent.width
+            wrapMode: Text.WordWrap
+            text: root.calendarText
+            textFormat: Text.PlainText
+            color: ThemeColor.foreground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+          HoverHandler { id: calendarHover }
+          PanelToolTip {
+            visible: calendarHover.hovered && (root.state.calendar_names || []).length > 0
+            text: (root.state.calendar_names || []).join("\n")
+          }
         }
       }
     }

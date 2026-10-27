@@ -33,16 +33,20 @@ fixtures = [dict(id='gone', title='Past', state='dismissed', event_start=10),
             dict(id='active', title='Now', state='active')]
 view = adapter.project(fixtures, {'eds_enabled': True, 'registry_state': 'ready',
                                  'calendars': [{'selected': False, 'state': 'error'},
-                                               {'selected': True, 'state': 'fresh'}]}, False, now=100)
+                                               {'selected': True, 'state': 'fresh', 'name': 'Work', 'account': 'Account'}]}, False, now=100)
 assert [item['id'] for item in view['items']] == ['active', 'followup', 'future']
 assert view['available'] and view['enabled'] is False
 assert view['calendar_problems'] == 0 and view['selected_calendars'] == 1
+assert view['calendar_names'] == ['Work — Account']
 assert view['items'][2]['title'] == '<b>Literal title</b>'
 view = adapter.project(fixtures, {'calendars': []}, True, now=100, events=[
     {'id': 'future', 'title': 'Duplicate', 'event_start': 200},
     {'id': 'native', 'title': 'Work meeting', 'event_start': 150}])
 assert [item['id'] for item in view['items']] == ['active', 'followup', 'native', 'future']
 assert view['items'][2]['title'] == 'Work meeting'
+view = adapter.project(fixtures, {'calendars': []}, True, now=100, declined={'future', 'followup'})
+assert [item['id'] for item in view['items']] == ['active']
+
 
 
 with tempfile.TemporaryDirectory(prefix='omarchy-reminder-test-') as directory:
@@ -95,6 +99,7 @@ with tempfile.TemporaryDirectory(prefix='omarchy-reminder-test-') as directory:
                                  '--config', str(config), '--helper', str(root / 'src/reminderctl.py'),
                                  '--overlay', str(stub)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         wait_state(lambda s: s['available'])
+        assert adapter.call('RefreshCalendars')[0] is False, 'Disabled integration must reject refresh'
         title = '<b>Literal</b> $(touch /tmp/never-run-reminder-adapter)'
         adapter.call('Submit', '(sssssst)', ('fixture', 'selected', 'fixture:adapter', title, '', '', 0))
         state = wait_state(lambda s: bool(s['items']))

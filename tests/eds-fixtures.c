@@ -30,7 +30,13 @@ main (void)
 {
 	GError *error = NULL;
 	ICalTimezone *utc = i_cal_timezone_get_utc_timezone ();
-	GPtrArray *events = reminder_eds_expand_ics ("calendar-uid", ics, utc,
+    const gchar *responses = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n"
+      "BEGIN:VEVENT\r\nUID:declined\r\nDTSTART:20261015T130000Z\r\nDTEND:20261015T140000Z\r\nATTENDEE;PARTSTAT=DECLINED:mailto:ME@example.com\r\nEND:VEVENT\r\n"
+      "BEGIN:VEVENT\r\nUID:accepted\r\nDTSTART:20261015T150000Z\r\nDTEND:20261015T160000Z\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\nATTENDEE;PARTSTAT=DECLINED:mailto:other@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+    GPtrArray *response_events = reminder_eds_expand_ics ("c", responses, "me@example.com", utc, 1792022400, 1792368000, FALSE, &error);
+    if (!response_events || response_events->len != 2 || !((ReminderEdsEvent *) g_ptr_array_index (response_events, 0))->declined || ((ReminderEdsEvent *) g_ptr_array_index (response_events, 1))->declined) return 30;
+    g_ptr_array_unref (response_events);
+	GPtrArray *events = reminder_eds_expand_ics ("calendar-uid", ics, NULL, utc,
 		1792022400, 1792368000, FALSE, &error);
 	if (!events) { g_printerr ("fixture expansion failed: %s\n", error ? error->message : "unknown"); return 1; }
 	if (events->len != 7) {
@@ -60,7 +66,7 @@ main (void)
 		g_printerr ("fixture did not preserve recurrence/EXDATE/moved/native/cancel semantics\n");
 		g_ptr_array_unref (events); return 3;
 	}
-	GPtrArray *global_default = reminder_eds_expand_ics ("calendar-uid", ics, utc, 1792022400, 1792368000, TRUE, &error);
+	GPtrArray *global_default = reminder_eds_expand_ics ("calendar-uid", ics, NULL, utc, 1792022400, 1792368000, TRUE, &error);
 	for (guint i = 0; global_default && i < global_default->len; i++) {
 		ReminderEdsEvent *event = g_ptr_array_index (global_default, i);
 		if (!event->native_alarm) { g_printerr ("global default reminder was not treated as native\n"); return 3; }
@@ -75,7 +81,7 @@ main (void)
 	if (sqlite3_exec (db,
 		"CREATE TABLE alerts(id TEXT PRIMARY KEY,title TEXT,body TEXT,destination TEXT,state TEXT,action TEXT,payload TEXT,revision INTEGER,expires_at INTEGER,snooze_until INTEGER,action_revision INTEGER,source_id TEXT,calendar_id TEXT,event_start INTEGER,event_end INTEGER,occurrence TEXT,owner TEXT,trigger_at INTEGER);"
 		"CREATE TABLE calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT,last_success_unix INTEGER,error TEXT,event_count INTEGER);"
-		"CREATE TABLE eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,event_end INTEGER,native_alarm INTEGER,all_day INTEGER,title TEXT);"
+		"CREATE TABLE eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,event_end INTEGER,native_alarm INTEGER,all_day INTEGER,title TEXT,declined INTEGER);"
 		"INSERT INTO alerts VALUES('eds:orphan','Old fallback','','','active','','',1,0,0,0,'eds-local','calendar-uid',0,0,'orphan','fallback',0);",
 		NULL, NULL, &sql_error) != SQLITE_OK) { g_printerr ("fixture DB schema failed: %s\n", sql_error); return 5; }
 	sqlite3_stmt *seed = NULL;
@@ -155,7 +161,7 @@ main (void)
 	g_free (after_empty); g_free (native_after_empty); g_ptr_array_unref (empty); g_ptr_array_unref (events);
 	sqlite3_close (db); g_free (alarm_id); g_free (moved_id);
 	const gchar bad_tz[] = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:bad\r\nDTSTART;TZID=Unknown/CalendarZone:20261015T090000\r\nDTEND;TZID=Unknown/CalendarZone:20261015T100000\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-	events = reminder_eds_expand_ics ("calendar-uid", bad_tz, utc, 1792022400, 1792368000, FALSE, &error);
+	events = reminder_eds_expand_ics ("calendar-uid", bad_tz, NULL, utc, 1792022400, 1792368000, FALSE, &error);
 	if (events || !error) { g_printerr ("unknown event timezone was not rejected\n"); return 4; }
 	g_clear_error (&error);
 	const gchar *iana_zones[] = { "America/New_York", "America/Toronto" };
@@ -164,7 +170,7 @@ main (void)
 			"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:iana-%u\r\n"
 			"DTSTART;TZID=%s:20261015T090000\r\nDTEND;TZID=%s:20261015T100000\r\n"
 			"END:VEVENT\r\nEND:VCALENDAR\r\n", i, iana_zones[i], iana_zones[i]);
-		events = reminder_eds_expand_ics ("calendar-uid", iana_ics, utc, 1792022400, 1792368000, FALSE, &error);
+		events = reminder_eds_expand_ics ("calendar-uid", iana_ics, NULL, utc, 1792022400, 1792368000, FALSE, &error);
 		g_free (iana_ics);
 		if (!events || events->len != 1 || ((ReminderEdsEvent *) g_ptr_array_index (events, 0))->start != 1792069200) {
 			g_printerr ("IANA event timezone %s was not resolved to the expected local time: %s\n",

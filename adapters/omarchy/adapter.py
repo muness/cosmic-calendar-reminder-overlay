@@ -25,12 +25,14 @@ def call(method, signature=None, args=()):
     return result.unpack()
 
 
-def project(alerts, diagnostics, enabled, now=None, events=()):
+def project(alerts, diagnostics, enabled, now=None, events=(), declined=()):
     """Expose reminder data only: this is not a second calendar/agenda engine."""
     now = int(time.time()) if now is None else now
     pending = []
     active = 0
     for alert in alerts:
+        if alert.get('id') in declined:
+            continue
         state = alert.get('state')
         if state not in ('active', 'scheduled', 'snoozed'):
             continue
@@ -52,8 +54,12 @@ def project(alerts, diagnostics, enabled, now=None, events=()):
     problems = sum(bool(c.get('error')) or c.get('state') in ('error', 'stale') for c in calendars)
     return {'available': True, 'enabled': bool(enabled), 'active_count': active,
             'items': pending[:6], 'selected_calendars': len(calendars),
+            'calendar_names': sorted((str(c.get('name') or c.get('calendar_id') or 'Calendar') +
+                                      (' — ' + str(c['account']) if c.get('account') else '')
+                                      for c in calendars), key=str.casefold),
             'eds_enabled': bool(diagnostics.get('eds_enabled')),
-            'calendar_problems': problems, 'registry_state': diagnostics.get('registry_state', 'unknown'),
+            'calendar_problems': problems, 'active_scans': int(diagnostics.get('active_scans', 0)),
+            'registry_state': diagnostics.get('registry_state', 'unknown'),
             'updated_at': now, 'error': None}
 
 
@@ -63,7 +69,8 @@ def snapshot():
         alerts = json.loads(call('List')[0])
         diagnostics = json.loads(call('Diagnostics')[0])
         events = json.loads(call('UpcomingEvents')[0])
-        return project(alerts, diagnostics, enabled, events=events)
+        declined = set(json.loads(call('DeclinedEvents')[0]))
+        return project(alerts, diagnostics, enabled, events=events, declined=declined)
     except (GLib.Error, ValueError, KeyError, TypeError):
         # Never report a stopped/unresponsive service as an intentional off state.
         return {'available': False, 'enabled': None, 'items': [], 'active_count': 0,
@@ -109,6 +116,9 @@ def action(name):
         # inherit the shell's output pipe or hold the widget in a busy state.
         subprocess.Popen(commands[name], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    elif name == 'refresh':
+        if not call('RefreshCalendars')[0]:
+            raise RuntimeError('Calendar integration is unavailable.')
     elif name == 'reload':
         call('GetPresentation')  # Do not let reminderctl implicitly start a stopped core.
         result = subprocess.run(commands[name], capture_output=True, text=True, timeout=10)
@@ -120,7 +130,7 @@ def action(name):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('command', choices=['status', 'watch', 'enable', 'disable', 'start', 'settings', 'reload', 'preview', 'calendar'])
+    parser.add_argument('command', choices=['status', 'watch', 'enable', 'disable', 'start', 'settings', 'reload', 'refresh', 'preview', 'calendar'])
     args = parser.parse_args()
     if args.command == 'watch':
         watch()

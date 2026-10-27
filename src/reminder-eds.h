@@ -15,11 +15,12 @@ typedef struct {
 	gint64 end;
 	gboolean native_alarm;
 	gboolean all_day;
+	gboolean declined;
 } ReminderEdsEvent;
 
 void reminder_eds_event_free (gpointer data);
 GPtrArray *reminder_eds_expand_ics (const gchar *source_uid,
-	const gchar *ical_text,
+	const gchar *ical_text, const gchar *identity,
 	ICalTimezone *default_timezone,
 	gint64 range_start,
 	gint64 range_end,
