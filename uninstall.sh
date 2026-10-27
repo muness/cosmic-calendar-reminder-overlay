@@ -15,6 +15,10 @@ config_home="${XDG_CONFIG_HOME:-${HOME:?HOME must be set}/.config}"
 data_home="${XDG_DATA_HOME:-${HOME:?HOME must be set}/.local/share}"
 state_dir="${REMINDER_STATE_HOME:-${XDG_STATE_HOME:-${HOME}/.local/state}/calendar-reminder-overlay}"
 unit="${config_home}/systemd/user/calendar-reminder-overlay.service"
+adapter_installer="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/adapters/omarchy/install.py"
+if [[ -d "$config_home/omarchy/plugins/muness.calendar-reminders" && -f "$adapter_installer" ]]; then
+  /usr/bin/python3 "$adapter_installer" --uninstall
+fi
 if command -v systemctl >/dev/null; then
   systemctl --user disable --now calendar-reminder-overlay.service >/dev/null 2>&1 || true
 fi

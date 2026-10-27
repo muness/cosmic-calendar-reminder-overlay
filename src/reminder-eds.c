@@ -8,6 +8,7 @@ typedef struct {
 	GPtrArray *owned_zones;
 	gboolean for_every_event;
 	gboolean recurring;
+	const gchar *identity;
 } Expansion;
 
 static ICalTimezone *
@@ -79,6 +80,23 @@ component_has_alarm (ICalComponent *component)
 	return TRUE;
 }
 
+static gboolean
+self_declined (ICalComponent *component, const gchar *identity)
+{
+    if (!identity || !*identity) return FALSE;
+    for (ICalProperty *p = i_cal_component_get_first_property (component, I_CAL_ATTENDEE_PROPERTY); p;) {
+        ICalProperty *next = i_cal_component_get_next_property (component, I_CAL_ATTENDEE_PROPERTY);
+        const gchar *address = i_cal_property_get_attendee (p);
+        if (address && g_ascii_strncasecmp (address, "mailto:", 7) == 0) address += 7;
+        ICalParameter *partstat = i_cal_property_get_first_parameter (p, I_CAL_PARTSTAT_PARAMETER);
+        gboolean declined = address && g_ascii_strcasecmp (address, identity) == 0 && partstat && i_cal_parameter_get_partstat (partstat) == I_CAL_PARTSTAT_DECLINED;
+        g_clear_object (&partstat); g_object_unref (p);
+        if (declined) { g_clear_object (&next); return TRUE; }
+        p = next;
+    }
+    return FALSE;
+}
+
 static ReminderEdsEvent *
 event_from_times (Expansion *expansion, ICalComponent *component, ICalTime *start, ICalTime *end, const gchar *rid, GError **error)
 {
@@ -101,6 +119,7 @@ event_from_times (Expansion *expansion, ICalComponent *component, ICalTime *star
 	if (event->start < 0 || event->end < 0) { reminder_eds_event_free (event); return NULL; }
 	event->native_alarm = expansion->for_every_event || component_has_alarm (component);
 	event->all_day = i_cal_time_is_date (start);
+	event->declined = self_declined (component, expansion->identity);
 	return event;
 }
 
@@ -144,7 +163,7 @@ remove_occurrence (GPtrArray *events, const gchar *uid, const gchar *rid)
 }
 
 GPtrArray *
-reminder_eds_expand_ics (const gchar *source_uid, const gchar *ical_text,
+reminder_eds_expand_ics (const gchar *source_uid, const gchar *ical_text, const gchar *identity,
 			 ICalTimezone *default_timezone, gint64 range_start,
 			 gint64 range_end, gboolean for_every_event, GError **error)
 {
@@ -187,7 +206,7 @@ reminder_eds_expand_ics (const gchar *source_uid, const gchar *ical_text,
 		} else if (i_cal_component_get_status (component) == I_CAL_STATUS_CANCELLED) {
 			g_clear_object (&recurrence);
 		} else {
-			Expansion expansion = { source_uid, events, default_timezone, root, owned_zones, for_every_event, has_recurrence (component) };
+			Expansion expansion = { source_uid, events, default_timezone, root, owned_zones, for_every_event, has_recurrence (component), identity };
 			if (expansion.recurring) {
 				if (!e_cal_recur_generate_instances_sync (component, interval_start, interval_end, add_instance, &expansion,
 						resolve_timezone, &expansion, default_timezone, NULL, error)) {
@@ -225,7 +244,7 @@ reminder_eds_expand_ics (const gchar *source_uid, const gchar *ical_text,
 		const gchar *uid = i_cal_component_get_uid (component);
 		remove_occurrence (events, uid ? uid : "", rid);
 		if (i_cal_component_get_status (component) != I_CAL_STATUS_CANCELLED && start && !i_cal_time_is_null_time (start)) {
-		Expansion expansion = { source_uid, events, default_timezone, root, owned_zones, for_every_event, FALSE };
+		Expansion expansion = { source_uid, events, default_timezone, root, owned_zones, for_every_event, FALSE, identity };
 		gint64 begin = time_to_unix (&expansion, start, error);
 		gint64 finish = end && !i_cal_time_is_null_time (end) ? time_to_unix (&expansion, end, error) : begin;
 		if (begin < 0 || finish < 0) { g_free (rid); g_clear_object (&recurrence); g_clear_object (&start); g_clear_object (&end); goto fail; }
@@ -305,7 +324,7 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 		g_hash_table_add (present, g_strdup (id));
 		gboolean native = event->native_alarm || global_native_default;
 		if (event->all_day && !all_day_enabled) native = FALSE;
-		if (sqlite3_prepare_v2 (database, "INSERT INTO eds_occurrences(alert_id,calendar_id,event_uid,recurrence_id,event_start,event_end,native_alarm,all_day) VALUES(?,?,?,?,?,?,?,?)", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
+		if (sqlite3_prepare_v2 (database, "INSERT INTO eds_occurrences(alert_id,calendar_id,event_uid,recurrence_id,event_start,event_end,native_alarm,all_day,title,declined) VALUES(?,?,?,?,?,?,?,?,?,?)", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
 		sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text (statement, 2, source_uid, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text (statement, 3, event->event_uid, -1, SQLITE_TRANSIENT);
@@ -314,6 +333,8 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 		sqlite3_bind_int64 (statement, 6, event->end);
 		sqlite3_bind_int (statement, 7, native);
 		sqlite3_bind_int (statement, 8, event->all_day);
+		sqlite3_bind_text (statement, 9, event->title && *event->title ? event->title : "Untitled event", -1, SQLITE_TRANSIENT);
+		sqlite3_bind_int (statement, 10, event->declined);
 		if (!step_done (database, statement, error)) { g_free (id); goto rollback; }
 		sqlite3_finalize (statement); statement = NULL;
 		if (event->end <= now) {

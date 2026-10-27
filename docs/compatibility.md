@@ -5,7 +5,7 @@ This table describes what has been verified for this implementation branch. The 
 | Environment | Evidence for this branch | Claim |
 |---|---|---|
 | COSMIC Wayland | Packaged install, calendar ingestion, huge overlay, and an explicit CLI reminder exercised locally; user accepted the overlay. | Locally exercised alpha |
-| Hyprland / Omarchy | No session test was available for this work. Layer Shell support depends on compositor behavior. | Unverified |
+| Hyprland / Omarchy | On 2026-10-21, native widget installed in Omarchy 4.0.3rc4, and GTK overlay mapped in the active Hyprland session; private reminder snoozed, returned, and dismissed. Headless Sway exercised fullscreen stacking and widget states. | Locally exercised; broader session coverage pending |
 | KDE Plasma Wayland | No session test was available for this work. | Unverified |
 | GNOME Wayland | A small optional Mutter helper prototype is included, but no GNOME session or binary was available to test it. | Experimental; unverified and unsupported |
 
@@ -20,3 +20,7 @@ API references: [get_gtk_application_id](https://mutter.gnome.org/meta/method.Wi
 ## Known COSMIC runtime behavior
 
 On the tested host, destroying/remapping a GTK Layer Shell surface can disconnect the renderer's Wayland client. The core retains alert state and supervises renderer restarts with bounded retry. Theme changes update CSS without replacing the surface. This workaround does not establish behavior on another compositor. Multi-monitor, lock/unlock, suspend/resume, and keyboard-only interaction still need broader session coverage.
+
+## Omarchy verification boundary
+
+The adapter uses the shared EDS core over session D-Bus and the existing GTK renderer. Automated private-bus checks cover service loss/recovery, presentation on/off, pending reminder projection, literal event titles, and repeatable installation/removal without altering calendar selection. Isolated rendered checks cover the widget's ready, disabled, and unavailable states. The live Hyprland check confirms an overlay layer and snooze/return/dismiss; fullscreen stacking was observed in headless Sway, not asserted for every Hyprland configuration. Multiple monitors, lock/unlock, suspend/resume, and every pointer/keyboard interaction still need broader user coverage.

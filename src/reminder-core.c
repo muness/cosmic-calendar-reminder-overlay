@@ -35,6 +35,7 @@ static gboolean eds_starting;
 static GCancellable *eds_start_cancellable;
 static GHashTable *eds_scans;
 static guint eds_rescan_source;
+static gboolean manual_refresh;
 static guint eds_retry_source;
 static gboolean global_native_default;
 static GSettings *global_calendar_settings;
@@ -77,6 +78,9 @@ static const gchar introspection_xml[] =
   "<method name='Status'><arg type='s' direction='in'/><arg type='s' direction='out'/></method>"
   "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='out'/><arg type='s' direction='out'/><arg type='s' direction='out'/><arg type='s' direction='out'/><arg type='t' direction='out'/><arg type='t' direction='out'/></method>"
   "<method name='List'><arg type='s' direction='out'/></method>"
+  "<method name='UpcomingEvents'><arg type='s' direction='out'/></method>"
+  "<method name='DeclinedEvents'><arg type='s' direction='out'/></method>"
+  "<method name='RefreshCalendars'><arg type='b' direction='out'/></method>"
   "<method name='ReloadPolicy'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='b' direction='out'/></method>"
   "<method name='StopAudio'></method>"
   "<method name='SetForeground'><arg type='s' direction='in'/></method>"
@@ -767,6 +771,9 @@ typedef struct {
 	guint timeout_source;
 	gboolean for_every_event;
 	gboolean scan_again;
+	gboolean refresh_provider;
+	gboolean refresh_again;
+	gchar *refresh_error;
 	gboolean invalidated;
 } EdsScan;
 
@@ -776,6 +783,7 @@ eds_scan_free (EdsScan *scan)
 	if (!scan) return;
 	if (scan->timeout_source) g_source_remove (scan->timeout_source);
 	g_free (scan->source_uid);
+	g_free (scan->refresh_error);
 	g_clear_object (&scan->source);
 	g_clear_object (&scan->client);
 	g_clear_object (&scan->cancellable);
@@ -795,10 +803,12 @@ static void
 eds_scan_finish (EdsScan *scan)
 {
 	ESource *source = scan->scan_again ? g_object_ref (scan->source) : NULL;
+	gboolean refresh_again = scan->refresh_again;
 	if (eds_scans && g_hash_table_lookup (eds_scans, scan->source_uid) == scan)
 		g_hash_table_remove (eds_scans, scan->source_uid);
 	eds_scan_free (scan);
-	if (source) { scan_source (source); g_object_unref (source); }
+	if (bus_connection) g_dbus_connection_emit_signal (bus_connection, NULL, OBJECT_PATH, IFACE, "Changed", g_variant_new ("(st)", "calendar-refresh", (guint64) 0), NULL);
+	if (source) { gboolean previous = manual_refresh; manual_refresh = refresh_again; scan_source (source); manual_refresh = previous; g_object_unref (source); }
 }
 
 static void
@@ -928,6 +938,7 @@ calendar_snapshot_to_ical (GSList *components)
 
 typedef struct {
 	gchar *ical;
+	gchar *identity;
 	ICalTimezone *zone;
 	gint64 now;
 	gboolean for_every_event;
@@ -943,6 +954,7 @@ eds_parse_free (gpointer data)
 {
 	EdsParse *parse = data;
 	g_free (parse->ical);
+	g_free (parse->identity);
 	g_clear_object (&parse->zone);
 	g_free (parse);
 }
@@ -965,7 +977,7 @@ eds_parse_worker (GTask *task, gpointer source_object, gpointer task_data, GCanc
 	GPtrArray *events;
 	(void) cancellable; (void) source_object;
 	if (!parse || !scan) { g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED, "Missing calendar parse context"); return; }
-	events = reminder_eds_expand_ics (scan->source_uid, parse->ical, parse->zone,
+	events = reminder_eds_expand_ics (scan->source_uid, parse->ical, parse->identity, parse->zone,
 		parse->now - 7 * 86400, parse->now + 90 * 86400, parse->for_every_event, &error);
 	if (!events) g_task_return_error (task, error ? error : g_error_new_literal (G_IO_ERROR, G_IO_ERROR_FAILED, "Calendar expansion failed"));
 	else g_task_return_pointer (task, events, (GDestroyNotify) g_ptr_array_unref);
@@ -985,6 +997,7 @@ eds_parse_done (GObject *source, GAsyncResult *result, gpointer user_data)
 			calendar_all_day_enabled, global_native_default, lead_minutes, (gint64) time (NULL), NULL, &error))
 			g_warning ("Could not apply EDS snapshot for %s: %s", scan->source_uid, error ? error->message : "unknown error");
 		else {
+			if (scan->refresh_error) calendar_sync_state (scan->source_uid, "stale", scan->refresh_error);
 			reset_renderer_retries ();
 			reconcile_native_reminders (scan->source_uid);
 			restore_native_reminder_pointers ();
@@ -1029,7 +1042,13 @@ eds_fetch_done (GObject *source, GAsyncResult *result, gpointer user_data)
 			if (!zone) g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA, "No timezone is available for this calendar; preserving the prior snapshot");
 			if (zone) {
 				EdsParse *parse = g_new0 (EdsParse, 1);
-				parse->ical = ical; parse->zone = g_object_ref (zone); parse->now = (gint64) time (NULL); parse->for_every_event = scan->for_every_event;
+				ESource *auth_source = e_source_registry_find_extension (eds_registry, scan->source, E_SOURCE_EXTENSION_AUTHENTICATION);
+                if (auth_source) {
+                    ESourceAuthentication *auth = e_source_get_extension (auth_source, E_SOURCE_EXTENSION_AUTHENTICATION);
+                    parse->identity = e_source_authentication_dup_user (auth);
+                    g_object_unref (auth_source);
+                }
+                parse->ical = ical; parse->zone = g_object_ref (zone); parse->now = (gint64) time (NULL); parse->for_every_event = scan->for_every_event;
 				EdsWork *work = g_new0 (EdsWork, 1); work->scan = scan; work->parse = parse;
 				GTask *task = g_task_new (scan->client, scan->cancellable, eds_parse_done, scan);
 				/* The worker reads scan->source_uid, so cancellation must not
@@ -1058,6 +1077,19 @@ eds_fetch_done (GObject *source, GAsyncResult *result, gpointer user_data)
 }
 
 static void
+eds_refresh_done (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+    EdsScan *scan = user_data; GError *error = NULL;
+    if (!e_client_refresh_finish (E_CLIENT (source), result, &error)) {
+        scan->refresh_error = g_strdup (error ? error->message : "Calendar provider refresh failed");
+        g_warning ("Calendar provider refresh failed: %s", scan->refresh_error);
+        g_clear_error (&error);
+    }
+    if (scan->invalidated) { eds_scan_finish (scan); return; }
+    e_cal_client_get_object_list_as_comps (scan->client, "#t", scan->cancellable, eds_fetch_done, scan);
+}
+
+static void
 eds_connect_done (GObject *source, GAsyncResult *result, gpointer user_data)
 {
 	EdsScan *scan = user_data;
@@ -1073,7 +1105,9 @@ eds_connect_done (GObject *source, GAsyncResult *result, gpointer user_data)
 	}
 	scan->client = E_CAL_CLIENT (client);
 	if (scan->invalidated) { eds_scan_finish (scan); return; }
-	e_cal_client_get_object_list_as_comps (scan->client, "#t", scan->cancellable, eds_fetch_done, scan);
+	if (scan->refresh_provider && e_client_check_refresh_supported (client))
+        e_client_refresh (client, scan->cancellable, eds_refresh_done, scan);
+    else e_cal_client_get_object_list_as_comps (scan->client, "#t", scan->cancellable, eds_fetch_done, scan);
 	(void) source;
 }
 
@@ -1083,9 +1117,10 @@ scan_source (ESource *source)
 	const gchar *uid = e_source_get_uid (source);
 	EdsScan *scan;
 	if (!eds_enabled || !eds_registry || !uid || !calendar_source_selected (source)) return;
-	if (eds_scans && g_hash_table_contains (eds_scans, uid)) { ((EdsScan *) g_hash_table_lookup (eds_scans, uid))->scan_again = TRUE; return; }
+	if (eds_scans && g_hash_table_contains (eds_scans, uid)) { EdsScan *pending = g_hash_table_lookup (eds_scans, uid); pending->scan_again = TRUE; pending->refresh_again |= manual_refresh; return; }
 	scan = g_new0 (EdsScan, 1);
 	scan->source_uid = g_strdup (uid);
+	scan->refresh_provider = manual_refresh;
 	scan->source = g_object_ref (source);
 	scan->cancellable = g_cancellable_new ();
 	ESourceAlarms *alarms = e_source_has_extension (source, E_SOURCE_EXTENSION_ALARMS) ?
@@ -1458,6 +1493,11 @@ diagnostics_json (void)
 			const gchar *calendar_id = (const gchar *) sqlite3_column_text (st, 0);
 			json_builder_begin_object (builder);
 			json_builder_set_member_name (builder, "calendar_id"); json_builder_add_string_value (builder, calendar_id);
+            ESource *calendar_source = eds_registry ? e_source_registry_ref_source (eds_registry, calendar_id) : NULL;
+            ESource *parent = calendar_source && e_source_get_parent (calendar_source) ? e_source_registry_ref_source (eds_registry, e_source_get_parent (calendar_source)) : NULL;
+            json_builder_set_member_name (builder, "name"); json_builder_add_string_value (builder, calendar_source ? e_source_get_display_name (calendar_source) : calendar_id);
+            json_builder_set_member_name (builder, "account"); json_builder_add_string_value (builder, parent ? e_source_get_display_name (parent) : "");
+            g_clear_object (&parent); g_clear_object (&calendar_source);
 			json_builder_set_member_name (builder, "selected"); json_builder_add_boolean_value (builder, eds_enabled && calendar_uid_selected (calendar_id));
 			json_builder_set_member_name (builder, "state"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 1));
 			json_builder_set_member_name (builder, "last_success_unix"); json_builder_add_int_value (builder, sqlite3_column_int64 (st, 2));
@@ -1710,6 +1750,41 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
       gchar *item = row_json (st); if (!first) g_string_append_c (list, ','); g_string_append (list, item); g_free (item); first = FALSE;
     }
     sqlite3_finalize (st); g_string_append_c (list, ']'); g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", list->str)); g_string_free (list, TRUE);
+  } else if (g_str_equal (method, "UpcomingEvents")) {
+    sqlite3_stmt *st = NULL;
+    JsonBuilder *builder = json_builder_new ();
+    json_builder_begin_array (builder);
+    if (sqlite3_prepare_v2 (db, "SELECT o.alert_id,o.title,o.event_start,o.calendar_id FROM eds_occurrences o LEFT JOIN alerts a ON a.id=o.alert_id WHERE o.native_alarm=1 AND o.declined=0 AND o.all_day=0 AND o.title!='' AND o.event_start>? AND (a.state IS NULL OR a.state NOT IN ('dismissed','cancelled','active','snoozed','scheduled')) ORDER BY o.event_start", -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64 (st, 1, time (NULL));
+      while (sqlite3_step (st) == SQLITE_ROW) {
+        const gchar *calendar = (const gchar *) sqlite3_column_text (st, 3);
+        if (!calendar_uid_selected (calendar)) continue;
+        json_builder_begin_object (builder);
+        json_builder_set_member_name (builder, "id"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 0));
+        json_builder_set_member_name (builder, "title"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 1));
+        json_builder_set_member_name (builder, "event_start"); json_builder_add_int_value (builder, sqlite3_column_int64 (st, 2));
+        json_builder_end_object (builder);
+      }
+    }
+    sqlite3_finalize (st); json_builder_end_array (builder);
+    JsonGenerator *generator = json_generator_new (); JsonNode *root = json_builder_get_root (builder);
+    json_generator_set_root (generator, root); gchar *json = json_generator_to_data (generator, NULL);
+    g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", json));
+    g_free (json); json_node_free (root); g_object_unref (generator); g_object_unref (builder);
+  } else if (g_str_equal (method, "DeclinedEvents")) {
+    sqlite3_stmt *st = NULL; JsonBuilder *b = json_builder_new (); json_builder_begin_array (b);
+    if (sqlite3_prepare_v2 (db, "SELECT alert_id,calendar_id FROM eds_occurrences WHERE declined=1", -1, &st, NULL) == SQLITE_OK)
+      while (sqlite3_step (st) == SQLITE_ROW)
+        if (calendar_uid_selected ((const gchar *) sqlite3_column_text (st, 1))) json_builder_add_string_value (b, (const gchar *) sqlite3_column_text (st, 0));
+    sqlite3_finalize (st); json_builder_end_array (b); JsonGenerator *g = json_generator_new (); JsonNode *n = json_builder_get_root (b);
+    json_generator_set_root (g, n); gchar *json = json_generator_to_data (g, NULL);
+    g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", json));
+    g_free (json); json_node_free (n); g_object_unref (g); g_object_unref (b);
+  } else if (g_str_equal (method, "RefreshCalendars")) {
+    gboolean ready = eds_enabled && eds_registry != NULL;
+    if (ready) { manual_refresh = TRUE; scan_selected_calendars (); manual_refresh = FALSE;
+      if (bus_connection) g_dbus_connection_emit_signal (bus_connection, NULL, OBJECT_PATH, IFACE, "Changed", g_variant_new ("(st)", "calendar-refresh", (guint64) 0), NULL); }
+    g_dbus_method_invocation_return_value (invocation, g_variant_new ("(b)", ready));
   } else if (g_str_equal (method, "ReloadPolicy")) {
 	const gchar *path_in, *helper_in; GError *error = NULL; gboolean ok;
 	g_variant_get (parameters, "(&s&s)", &path_in, &helper_in);
@@ -1864,6 +1939,14 @@ int main (int argc, char **argv)
 		if (!strstr (error ? error->message : "", "duplicate column name")) { g_printerr ("state migration: %s\n", error ? error->message : "unknown error"); return 1; }
 		g_clear_error (&error);
 	}
+  if (!exec_sql ("ALTER TABLE eds_occurrences ADD COLUMN title TEXT NOT NULL DEFAULT ''", &error)) {
+    if (!strstr (error ? error->message : "", "duplicate column name")) { g_printerr ("state migration: %s\n", error ? error->message : "unknown error"); return 1; }
+    g_clear_error (&error);
+  }
+  if (!exec_sql ("ALTER TABLE eds_occurrences ADD COLUMN declined INTEGER NOT NULL DEFAULT 0", &error)) {
+    if (!strstr (error ? error->message : "", "duplicate column name")) { g_printerr ("state migration: %s\n", error ? error->message : "unknown error"); return 1; }
+    g_clear_error (&error);
+  }
   sqlite3_stmt *columns = NULL;
   gboolean has_action_revision = FALSE, has_source_id = FALSE, has_calendar_id = FALSE, has_event_start = FALSE, has_event_end = FALSE, has_occurrence = FALSE, has_owner = FALSE, has_trigger_at = FALSE;
   if (sqlite3_prepare_v2 (db, "PRAGMA table_info(alerts)", -1, &columns, NULL) != SQLITE_OK) return 1;

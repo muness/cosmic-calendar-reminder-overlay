@@ -2,7 +2,7 @@
 
 Huge calendar reminders for Linux, with buttons you can actually click: **Open meeting**, **Dismiss**, and **Snooze**. The overlay covers your screen and stays until you act. Ordinary desktop notifications keep using your existing notification service.
 
-Early alpha. Installed and used on COSMIC Wayland; other desktops are [unverified](docs/compatibility.md). Calendar accounts come from Evolution Data Server (EDS). You can also send reminders from scripts without connecting a calendar.
+Early alpha. Installed and used on COSMIC Wayland and locally exercised on Omarchy/Hyprland; see [desktop evidence and limits](docs/compatibility.md). Calendar accounts come from Evolution Data Server (EDS). You can also send reminders from scripts without connecting a calendar.
 
 ## Try the overlay first
 
@@ -26,6 +26,24 @@ The preview shows a **Preview reminder — no calendar event** overlay with real
 The supplied link opens only when you click **Open meeting**. Keyboard use: click the background, then Tab to a button and press Enter. Typing as an alert arrives cannot activate its buttons before Tab navigation.
 
 Add `~/.local/bin` to your PATH if these commands are not found without the full path. You can skip the preview and continue below.
+
+## Omarchy widget
+
+Install the shared reminder service and native Omarchy bar widget:
+
+```sh
+./install.sh --with-omarchy
+```
+
+If the service is already installed, add only the widget without restarting it:
+
+```sh
+/usr/bin/python3 adapters/omarchy/install.py
+```
+
+Click the bell beside the clock to see active and upcoming reminders, calendar sync status, and controls for reminders, calendar settings, and a silent overlay preview. Calendar accounts, selection, snoozes, and dismissals use the same service as COSMIC. Connect calendars and activate the service using the steps below if this is a fresh installation.
+
+The widget follows Omarchy's colors and supports keyboard navigation. Installation backs up your shell configuration and preserves other widgets. See [adapter installation, removal, and verification](adapters/omarchy/README.md).
 
 ## Connect your calendars
 

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "muness.calendar-reminders",
+  "name": "Calendar reminders",
+  "version": "1.0.0",
+  "author": "Muness",
+  "description": "Shared calendar reminders, presentation controls and overlay preview",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "Widget.qml"},
+  "barWidget": {"displayName": "Calendar reminders", "category": "Time", "allowMultiple": false}
+}
