@@ -559,14 +559,32 @@ native_occurrence_is_current (const gchar *source_uid, const gchar *id, gint64 s
 	}
 	sqlite3_finalize (statement); statement = NULL;
 	if (!snapshot_ready) return TRUE;
-	if (sqlite3_prepare_v2 (db, "SELECT native_alarm,event_start FROM eds_occurrences WHERE alert_id=? AND calendar_id=?", -1, &statement, NULL) == SQLITE_OK) {
+	if (sqlite3_prepare_v2 (db, "SELECT native_alarm,event_start,declined FROM eds_occurrences WHERE alert_id=? AND calendar_id=?", -1, &statement, NULL) == SQLITE_OK) {
 		sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text (statement, 2, source_uid, -1, SQLITE_TRANSIENT);
 		if (sqlite3_step (statement) == SQLITE_ROW)
-			current = sqlite3_column_int (statement, 0) != 0 && sqlite3_column_int64 (statement, 1) == start;
+			current = sqlite3_column_int (statement, 0) != 0 && sqlite3_column_int64 (statement, 1) == start && sqlite3_column_int (statement, 2) == 0;
 	}
 	sqlite3_finalize (statement);
 	return current;
+}
+
+/* Some providers return an instance RID even for a non-recurring event.
+ * Use the snapshot's canonical ID only for an exact UID and start match. */
+static gchar *
+native_snapshot_id (const gchar *source_uid, const gchar *event_uid, const gchar *rid, gint64 start)
+{
+    gchar *id = native_alert_id (source_uid, event_uid, rid);
+    sqlite3_stmt *st = NULL;
+    if (!rid || !*rid) return id;
+    if (sqlite3_prepare_v2 (db, "SELECT alert_id FROM eds_occurrences WHERE calendar_id=? AND event_uid=? AND recurrence_id='' AND event_start=?", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text (st, 1, source_uid, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text (st, 2, event_uid, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64 (st, 3, start);
+        if (sqlite3_step (st) == SQLITE_ROW) { g_free (id); id = g_strdup ((const gchar *) sqlite3_column_text (st, 0)); }
+    }
+    sqlite3_finalize (st);
+    return id;
 }
 
 static gchar *
@@ -578,7 +596,7 @@ native_reminder_id (const EReminderData *reminder)
 	const gchar *event_uid = component ? e_cal_component_get_uid (component) : NULL;
 	const gchar *rid = instance ? e_cal_component_alarm_instance_get_rid (instance) : NULL;
 	if (!source_uid || !event_uid || !instance) return NULL;
-	return native_alert_id (source_uid, event_uid, rid);
+	return native_snapshot_id (source_uid, event_uid, rid, e_cal_component_alarm_instance_get_occur_start (instance));
 }
 
 static gchar *
@@ -651,8 +669,9 @@ native_reminder_triggered (EReminderWatcher *watcher, const GSList *reminders, g
 		end = e_cal_component_alarm_instance_get_occur_end (instance);
 		const gchar *rid = e_cal_component_alarm_instance_get_rid (instance);
 		occurrence = g_strdup_printf ("%s/%s", event_uid, rid ? rid : "");
-		id = native_alert_id (source_uid, event_uid, rid);
+		id = native_snapshot_id (source_uid, event_uid, rid, start);
 		if (!native_occurrence_is_current (source_uid, id, start)) {
+            g_message ("Native reminder skipped: no eligible matching calendar occurrence (calendar=%s, event=%s)", source_uid, event_uid);
 			g_free (id); g_free (occurrence); g_object_unref (source);
 			continue;
 		}

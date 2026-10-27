@@ -35,6 +35,15 @@ main (void)
       "BEGIN:VEVENT\r\nUID:accepted\r\nDTSTART:20261015T150000Z\r\nDTEND:20261015T160000Z\r\nATTENDEE;PARTSTAT=ACCEPTED:mailto:me@example.com\r\nATTENDEE;PARTSTAT=DECLINED:mailto:other@example.com\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
     GPtrArray *response_events = reminder_eds_expand_ics ("c", responses, "me@example.com", utc, 1792022400, 1792368000, FALSE, &error);
     if (!response_events || response_events->len != 2 || !((ReminderEdsEvent *) g_ptr_array_index (response_events, 0))->declined || ((ReminderEdsEvent *) g_ptr_array_index (response_events, 1))->declined) return 30;
+    sqlite3 *response_db = NULL;
+    sqlite3_open (":memory:", &response_db);
+    sqlite3_exec (response_db, "CREATE TABLE alerts(id TEXT PRIMARY KEY,title TEXT,body TEXT,destination TEXT,state TEXT,action TEXT,payload TEXT,revision INTEGER,expires_at INTEGER,snooze_until INTEGER,action_revision INTEGER,source_id TEXT,calendar_id TEXT,event_start INTEGER,event_end INTEGER,occurrence TEXT,owner TEXT,trigger_at INTEGER); CREATE TABLE calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT,last_success_unix INTEGER,error TEXT,event_count INTEGER); CREATE TABLE eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,event_end INTEGER,native_alarm INTEGER,all_day INTEGER,title TEXT,declined INTEGER);", NULL, NULL, NULL);
+    if (!reminder_eds_apply_snapshot (response_db, "c", response_events, TRUE, TRUE, FALSE, FALSE, 5, 1792000000, NULL, &error)) return 31;
+    gchar *declined_id = reminder_eds_alert_id ("c", "declined", "");
+    gchar *accepted_id = reminder_eds_alert_id ("c", "accepted", "");
+    gchar *declined_state = row_field (response_db, declined_id, "state"), *accepted_state = row_field (response_db, accepted_id, "state");
+    if (declined_state || g_strcmp0 (accepted_state, "scheduled")) return 32;
+    g_free (declined_id); g_free (accepted_id); g_free (declined_state); g_free (accepted_state); sqlite3_close (response_db);
     g_ptr_array_unref (response_events);
 	GPtrArray *events = reminder_eds_expand_ics ("calendar-uid", ics, NULL, utc,
 		1792022400, 1792368000, FALSE, &error);
