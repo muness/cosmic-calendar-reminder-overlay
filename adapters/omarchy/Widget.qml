@@ -170,7 +170,7 @@ Panel {
         PanelSeparator { width: parent.width; visible: root.available }
         Text {
           visible: root.available
-          text: root.state.active_count > 0 ? "Active and upcoming" : "Upcoming reminders"
+          text: root.state.active_count > 0 ? "Active and upcoming" : "Upcoming events and reminders"
           color: ThemeColor.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.body
@@ -207,7 +207,7 @@ Panel {
         Text {
           visible: root.available && root.reminders.length === 0
           width: parent.width
-          text: "No pending reminders. New calendar reminders will appear here."
+          text: "No upcoming events or reminders."
           textFormat: Text.PlainText
           color: ThemeColor.foreground
           font.family: Style.font.family

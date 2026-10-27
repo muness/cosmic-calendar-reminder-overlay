@@ -25,7 +25,7 @@ def call(method, signature=None, args=()):
     return result.unpack()
 
 
-def project(alerts, diagnostics, enabled, now=None):
+def project(alerts, diagnostics, enabled, now=None, events=()):
     """Expose reminder data only: this is not a second calendar/agenda engine."""
     now = int(time.time()) if now is None else now
     pending = []
@@ -42,6 +42,11 @@ def project(alerts, diagnostics, enabled, now=None):
         pending.append({'id': alert['id'], 'title': str(alert.get('title') or 'Untitled reminder'),
                         'event_start': start, 'state': state,
                         'calendar': bool(alert.get('source_id') and alert.get('calendar_id'))})
+    existing = {item['id'] for item in pending}
+    for event in events:
+        if event['id'] not in existing:
+            pending.append({'id': event['id'], 'title': event.get('title') or 'Untitled event',
+                            'event_start': int(event['event_start']), 'state': 'scheduled', 'calendar': True})
     pending.sort(key=lambda item: (item['state'] != 'active', item['event_start'] or now, item['title']))
     calendars = [c for c in diagnostics.get('calendars', []) if c.get('selected')]
     problems = sum(bool(c.get('error')) or c.get('state') in ('error', 'stale') for c in calendars)
@@ -57,7 +62,8 @@ def snapshot():
         enabled = call('GetPresentation')[0]
         alerts = json.loads(call('List')[0])
         diagnostics = json.loads(call('Diagnostics')[0])
-        return project(alerts, diagnostics, enabled)
+        events = json.loads(call('UpcomingEvents')[0])
+        return project(alerts, diagnostics, enabled, events=events)
     except (GLib.Error, ValueError, KeyError, TypeError):
         # Never report a stopped/unresponsive service as an intentional off state.
         return {'available': False, 'enabled': None, 'items': [], 'active_count': 0,

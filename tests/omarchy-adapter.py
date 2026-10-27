@@ -38,6 +38,12 @@ assert [item['id'] for item in view['items']] == ['active', 'followup', 'future'
 assert view['available'] and view['enabled'] is False
 assert view['calendar_problems'] == 0 and view['selected_calendars'] == 1
 assert view['items'][2]['title'] == '<b>Literal title</b>'
+view = adapter.project(fixtures, {'calendars': []}, True, now=100, events=[
+    {'id': 'future', 'title': 'Duplicate', 'event_start': 200},
+    {'id': 'native', 'title': 'Work meeting', 'event_start': 150}])
+assert [item['id'] for item in view['items']] == ['active', 'followup', 'native', 'future']
+assert view['items'][2]['title'] == 'Work meeting'
+
 
 with tempfile.TemporaryDirectory(prefix='omarchy-reminder-test-') as directory:
     tmp = Path(directory)

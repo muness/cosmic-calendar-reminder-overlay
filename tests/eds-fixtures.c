@@ -75,7 +75,7 @@ main (void)
 	if (sqlite3_exec (db,
 		"CREATE TABLE alerts(id TEXT PRIMARY KEY,title TEXT,body TEXT,destination TEXT,state TEXT,action TEXT,payload TEXT,revision INTEGER,expires_at INTEGER,snooze_until INTEGER,action_revision INTEGER,source_id TEXT,calendar_id TEXT,event_start INTEGER,event_end INTEGER,occurrence TEXT,owner TEXT,trigger_at INTEGER);"
 		"CREATE TABLE calendar_sync(calendar_id TEXT PRIMARY KEY,state TEXT,last_success_unix INTEGER,error TEXT,event_count INTEGER);"
-		"CREATE TABLE eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,event_end INTEGER,native_alarm INTEGER,all_day INTEGER);"
+		"CREATE TABLE eds_occurrences(alert_id TEXT PRIMARY KEY,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,event_end INTEGER,native_alarm INTEGER,all_day INTEGER,title TEXT);"
 		"INSERT INTO alerts VALUES('eds:orphan','Old fallback','','','active','','',1,0,0,0,'eds-local','calendar-uid',0,0,'orphan','fallback',0);",
 		NULL, NULL, &sql_error) != SQLITE_OK) { g_printerr ("fixture DB schema failed: %s\n", sql_error); return 5; }
 	sqlite3_stmt *seed = NULL;

@@ -305,7 +305,7 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 		g_hash_table_add (present, g_strdup (id));
 		gboolean native = event->native_alarm || global_native_default;
 		if (event->all_day && !all_day_enabled) native = FALSE;
-		if (sqlite3_prepare_v2 (database, "INSERT INTO eds_occurrences(alert_id,calendar_id,event_uid,recurrence_id,event_start,event_end,native_alarm,all_day) VALUES(?,?,?,?,?,?,?,?)", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
+		if (sqlite3_prepare_v2 (database, "INSERT INTO eds_occurrences(alert_id,calendar_id,event_uid,recurrence_id,event_start,event_end,native_alarm,all_day,title) VALUES(?,?,?,?,?,?,?,?,?)", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
 		sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text (statement, 2, source_uid, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_text (statement, 3, event->event_uid, -1, SQLITE_TRANSIENT);
@@ -314,6 +314,7 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 		sqlite3_bind_int64 (statement, 6, event->end);
 		sqlite3_bind_int (statement, 7, native);
 		sqlite3_bind_int (statement, 8, event->all_day);
+		sqlite3_bind_text (statement, 9, event->title && *event->title ? event->title : "Untitled event", -1, SQLITE_TRANSIENT);
 		if (!step_done (database, statement, error)) { g_free (id); goto rollback; }
 		sqlite3_finalize (statement); statement = NULL;
 		if (event->end <= now) {

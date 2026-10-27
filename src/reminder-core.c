@@ -77,6 +77,7 @@ static const gchar introspection_xml[] =
   "<method name='Status'><arg type='s' direction='in'/><arg type='s' direction='out'/></method>"
   "<method name='Get'><arg type='s' direction='in'/><arg type='s' direction='out'/><arg type='s' direction='out'/><arg type='s' direction='out'/><arg type='s' direction='out'/><arg type='t' direction='out'/><arg type='t' direction='out'/></method>"
   "<method name='List'><arg type='s' direction='out'/></method>"
+  "<method name='UpcomingEvents'><arg type='s' direction='out'/></method>"
   "<method name='ReloadPolicy'><arg type='s' direction='in'/><arg type='s' direction='in'/><arg type='b' direction='out'/></method>"
   "<method name='StopAudio'></method>"
   "<method name='SetForeground'><arg type='s' direction='in'/></method>"
@@ -1710,6 +1711,27 @@ method_call (GDBusConnection *connection, const gchar *sender, const gchar *path
       gchar *item = row_json (st); if (!first) g_string_append_c (list, ','); g_string_append (list, item); g_free (item); first = FALSE;
     }
     sqlite3_finalize (st); g_string_append_c (list, ']'); g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", list->str)); g_string_free (list, TRUE);
+  } else if (g_str_equal (method, "UpcomingEvents")) {
+    sqlite3_stmt *st = NULL;
+    JsonBuilder *builder = json_builder_new ();
+    json_builder_begin_array (builder);
+    if (sqlite3_prepare_v2 (db, "SELECT o.alert_id,o.title,o.event_start,o.calendar_id FROM eds_occurrences o LEFT JOIN alerts a ON a.id=o.alert_id WHERE o.native_alarm=1 AND o.all_day=0 AND o.title!='' AND o.event_start>? AND (a.state IS NULL OR a.state NOT IN ('dismissed','cancelled','active','snoozed','scheduled')) ORDER BY o.event_start", -1, &st, NULL) == SQLITE_OK) {
+      sqlite3_bind_int64 (st, 1, time (NULL));
+      while (sqlite3_step (st) == SQLITE_ROW) {
+        const gchar *calendar = (const gchar *) sqlite3_column_text (st, 3);
+        if (!calendar_uid_selected (calendar)) continue;
+        json_builder_begin_object (builder);
+        json_builder_set_member_name (builder, "id"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 0));
+        json_builder_set_member_name (builder, "title"); json_builder_add_string_value (builder, (const gchar *) sqlite3_column_text (st, 1));
+        json_builder_set_member_name (builder, "event_start"); json_builder_add_int_value (builder, sqlite3_column_int64 (st, 2));
+        json_builder_end_object (builder);
+      }
+    }
+    sqlite3_finalize (st); json_builder_end_array (builder);
+    JsonGenerator *generator = json_generator_new (); JsonNode *root = json_builder_get_root (builder);
+    json_generator_set_root (generator, root); gchar *json = json_generator_to_data (generator, NULL);
+    g_dbus_method_invocation_return_value (invocation, g_variant_new ("(s)", json));
+    g_free (json); json_node_free (root); g_object_unref (generator); g_object_unref (builder);
   } else if (g_str_equal (method, "ReloadPolicy")) {
 	const gchar *path_in, *helper_in; GError *error = NULL; gboolean ok;
 	g_variant_get (parameters, "(&s&s)", &path_in, &helper_in);
@@ -1864,6 +1886,10 @@ int main (int argc, char **argv)
 		if (!strstr (error ? error->message : "", "duplicate column name")) { g_printerr ("state migration: %s\n", error ? error->message : "unknown error"); return 1; }
 		g_clear_error (&error);
 	}
+  if (!exec_sql ("ALTER TABLE eds_occurrences ADD COLUMN title TEXT NOT NULL DEFAULT ''", &error)) {
+    if (!strstr (error ? error->message : "", "duplicate column name")) { g_printerr ("state migration: %s\n", error ? error->message : "unknown error"); return 1; }
+    g_clear_error (&error);
+  }
   sqlite3_stmt *columns = NULL;
   gboolean has_action_revision = FALSE, has_source_id = FALSE, has_calendar_id = FALSE, has_event_start = FALSE, has_event_end = FALSE, has_occurrence = FALSE, has_owner = FALSE, has_trigger_at = FALSE;
   if (sqlite3_prepare_v2 (db, "PRAGMA table_info(alerts)", -1, &columns, NULL) != SQLITE_OK) return 1;
