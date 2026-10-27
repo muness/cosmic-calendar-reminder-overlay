@@ -27,6 +27,16 @@ main (void)
 	if (calendar_source_selected (source)) { g_printerr ("disabled EDS source remained eligible\n"); return 7; }
 	if (calendar_uid_selected ("selection-fixture")) { g_printerr ("registry outage allowed presentation\n"); return 8; }
 	if (!calendar_uid_may_retain_snapshot ("selection-fixture")) { g_printerr ("registry outage discarded cached snapshot with selection override\n"); return 9; }
+    sqlite3_open (":memory:", &db);
+    sqlite3_exec (db, "CREATE TABLE calendar_sync(calendar_id TEXT,last_success_unix INTEGER); INSERT INTO calendar_sync VALUES('c',1); CREATE TABLE eds_occurrences(alert_id TEXT,calendar_id TEXT,event_uid TEXT,recurrence_id TEXT,event_start INTEGER,native_alarm INTEGER,declined INTEGER); INSERT INTO eds_occurrences VALUES('single','c','uid','',100,1,0); INSERT INTO eds_occurrences VALUES('declined','c','other','rid',100,1,1);", NULL, NULL, NULL);
+    gchar *canonical = native_snapshot_id ("c", "uid", "provider-rid", 100);
+    if (g_strcmp0 (canonical, "single") || !native_occurrence_is_current ("c", canonical, 100)) return 10;
+    g_free (canonical);
+    canonical = native_snapshot_id ("c", "uid", "provider-rid", 101);
+    if (!g_strcmp0 (canonical, "single") || native_occurrence_is_current ("c", canonical, 101)) return 11;
+    g_free (canonical);
+    if (native_occurrence_is_current ("c", "declined", 100)) return 12;
+    sqlite3_close (db); db = NULL;
 	g_hash_table_unref (selected_calendars);
 	g_free (policy_mode);
 	g_object_unref (source);

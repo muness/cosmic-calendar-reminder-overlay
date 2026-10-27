@@ -337,6 +337,14 @@ reminder_eds_apply_snapshot (sqlite3 *database, const gchar *source_uid,
 		sqlite3_bind_int (statement, 10, event->declined);
 		if (!step_done (database, statement, error)) { g_free (id); goto rollback; }
 		sqlite3_finalize (statement); statement = NULL;
+        if (event->declined) {
+            if (sqlite3_prepare_v2 (database, "UPDATE alerts SET state='withdrawn',revision=revision+1 WHERE id=? AND owner IN ('native','fallback') AND state IN ('active','scheduled','snoozed')", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
+            sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
+            gboolean step_ok = step_done (database, statement, error);
+            sqlite3_finalize (statement); statement = NULL; g_free (id);
+            if (!step_ok) goto rollback;
+            continue;
+        }
 		if (event->end <= now) {
 			if (sqlite3_prepare_v2 (database, "UPDATE alerts SET state='withdrawn',revision=revision+1 WHERE id=? AND owner IN ('native','fallback') AND state IN ('active','scheduled','snoozed')", -1, &statement, NULL) != SQLITE_OK) { g_free (id); goto sql_error; }
 			sqlite3_bind_text (statement, 1, id, -1, SQLITE_TRANSIENT);
